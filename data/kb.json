@@ -1,0 +1,74 @@
+[
+  {
+    "id": "policy-refund-30-standard",
+    "title": "Standard refund window",
+    "body": "Customers may request a refund within 30 days of the purchase date when the service has not been fully consumed.",
+    "tags": ["refund", "billing", "window"]
+  },
+  {
+    "id": "policy-cancellation-immediate",
+    "title": "Cancellation effective timing",
+    "body": "Cancellation requests become effective immediately after confirmation and prevent future billing cycles.",
+    "tags": ["cancellation", "billing"]
+  },
+  {
+    "id": "policy-manager-approval-exception",
+    "title": "Manager approval exception",
+    "body": "Any exception to a published billing or reimbursement rule requires documented manager approval before the exception is applied.",
+    "tags": ["manager", "approval", "exception"]
+  },
+  {
+    "id": "policy-password-reset-24h",
+    "title": "Password reset propagation",
+    "body": "After a password reset, account access updates can take up to 24 hours to propagate across all channels.",
+    "tags": ["password", "reset", "access"]
+  },
+  {
+    "id": "policy-eligibility-window-7",
+    "title": "Eligibility confirmation window",
+    "body": "Eligibility changes are confirmed within 7 business days after all required documents are received.",
+    "tags": ["eligibility", "documents", "window"]
+  },
+  {
+    "id": "policy-travel-reimbursement-60",
+    "title": "Travel reimbursement deadline",
+    "body": "Travel reimbursement requests must be submitted within 60 days of trip completion.",
+    "tags": ["travel", "reimbursement", "deadline"]
+  },
+  {
+    "id": "policy-document-deadline-10",
+    "title": "Supporting document deadline",
+    "body": "Supporting documents must be submitted within 10 calendar days of the request date.",
+    "tags": ["documents", "deadline"]
+  },
+  {
+    "id": "policy-escalation-sensitive-2h",
+    "title": "Sensitive case escalation",
+    "body": "Sensitive account changes and identity disputes must be escalated to the policy desk within 2 hours.",
+    "tags": ["escalation", "identity", "sensitive"]
+  },
+  {
+    "id": "policy-overtime-approval-pre",
+    "title": "Overtime approval rule",
+    "body": "Overtime must be pre-approved by a manager before hours are worked.",
+    "tags": ["overtime", "approval", "manager"]
+  },
+  {
+    "id": "policy-receipts-required-25",
+    "title": "Receipt requirement threshold",
+    "body": "Receipts are required for reimbursement claims of 25 dollars or more.",
+    "tags": ["receipts", "reimbursement", "threshold"]
+  },
+  {
+    "id": "policy-credit-expiry-45",
+    "title": "Service credit expiration",
+    "body": "Unused service credits expire 45 days after they are issued.",
+    "tags": ["credits", "expiration"]
+  },
+  {
+    "id": "policy-vpn-resync",
+    "title": "VPN credential resynchronization",
+    "body": "When VPN access fails after a password reset, clear cached credentials, confirm multifactor enrollment, and retry from the managed VPN client.",
+    "tags": ["vpn", "password", "multifactor", "access"]
+  }
+]

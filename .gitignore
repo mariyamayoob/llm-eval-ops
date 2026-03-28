@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+pytest-cache-files-*/
+api/src/tests/__pycache__/
+api/src/**/__pycache__/
+ui/src/__pycache__/
+data/*.db
+test_artifacts/
+certs/

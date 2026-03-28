@@ -1,0 +1,90 @@
+[
+  {
+    "case_id": "refund_direct_answer",
+    "question": "How long does a customer have to request a refund?",
+    "scenario": "normal",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-refund-30-standard"],
+    "acceptable_answer_facts": ["30 days"],
+    "forbidden_claims": ["90 days"],
+    "tags": ["direct_answerable"],
+    "difficulty": "easy"
+  },
+  {
+    "case_id": "vpn_direct_answer",
+    "question": "What should support do when VPN access fails after a password reset?",
+    "scenario": "normal",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-vpn-resync"],
+    "acceptable_answer_facts": ["clear cached credentials", "multifactor"],
+    "forbidden_claims": ["ignore multifactor"],
+    "tags": ["direct_answerable"],
+    "difficulty": "medium"
+  },
+  {
+    "case_id": "retrieval_miss_case",
+    "question": "What is the policy for pet insurance reimbursement?",
+    "scenario": "retrieval_miss",
+    "expected_should_refuse": true,
+    "required_citation_ids": [],
+    "acceptable_answer_facts": [],
+    "forbidden_claims": ["30 days"],
+    "tags": ["should_refuse_missing_evidence", "retrieval_miss"],
+    "difficulty": "medium"
+  },
+  {
+    "case_id": "conflicting_evidence_case",
+    "question": "How long does a customer have to request a refund?",
+    "scenario": "conflicting_evidence",
+    "expected_should_refuse": true,
+    "required_citation_ids": [],
+    "acceptable_answer_facts": [],
+    "forbidden_claims": ["45 days"],
+    "tags": ["should_refuse_conflicting_evidence", "policy_boundary_cases"],
+    "difficulty": "hard"
+  },
+  {
+    "case_id": "malformed_output_case",
+    "question": "When do unused service credits expire?",
+    "scenario": "malformed_json",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-credit-expiry-45"],
+    "acceptable_answer_facts": ["45 days"],
+    "forbidden_claims": ["90 days"],
+    "tags": ["malformed_output"],
+    "difficulty": "medium"
+  },
+  {
+    "case_id": "unsupported_claim_case",
+    "question": "How long does a customer have to request a refund?",
+    "scenario": "unsupported_answer",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-refund-30-standard"],
+    "acceptable_answer_facts": ["30 days"],
+    "forbidden_claims": ["90 days"],
+    "tags": ["unsupported_claim"],
+    "difficulty": "hard"
+  },
+  {
+    "case_id": "wrong_refusal_case",
+    "question": "How long does a customer have to request a refund?",
+    "scenario": "wrong_refusal",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-refund-30-standard"],
+    "acceptable_answer_facts": ["30 days"],
+    "forbidden_claims": ["insufficient evidence"],
+    "tags": ["policy_boundary_cases"],
+    "difficulty": "hard"
+  },
+  {
+    "case_id": "brand_voice_case",
+    "question": "When must receipts be submitted for reimbursement claims?",
+    "scenario": "normal",
+    "expected_should_refuse": false,
+    "required_citation_ids": ["policy-receipts-required-25"],
+    "acceptable_answer_facts": ["25 dollars"],
+    "forbidden_claims": ["always optional"],
+    "tags": ["tone_and_brand_voice"],
+    "difficulty": "easy"
+  }
+]
