@@ -5,7 +5,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from evals.contracts import OfflineEvalCaseResult, OfflineEvalSummary, ReviewQueueItem, ReviewerAnnotation
+from evals.contracts import (
+    OfflineComparisonCaseDelta,
+    OfflineComparisonSummary,
+    OfflineEvalCaseResult,
+    OfflineEvalSummary,
+    ReviewQueueItem,
+    ReviewerAnnotation,
+)
 from model.contracts import RunRecord, RunSummary
 
 
@@ -35,6 +42,12 @@ class StorageService:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS reviewer_annotations (review_queue_item_id TEXT, reviewer_label TEXT, annotation_json TEXT)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS offline_comparison_runs (comparison_id TEXT PRIMARY KEY, created_at TEXT, summary_json TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS offline_comparison_cases (comparison_id TEXT, case_id TEXT, delta_json TEXT, PRIMARY KEY(comparison_id, case_id))"
+            )
 
     def write_run(self, record: RunRecord) -> None:
         with self._connect() as conn:
@@ -55,7 +68,7 @@ class StorageService:
     def list_runs(self, limit: int = 50) -> list[RunSummary]:
         with self._connect() as conn:
             rows = conn.execute("SELECT record_json FROM run_records ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return [RunRecord.model_validate_json(row[0]).to_summary() if False else self._summary_from_record_json(row[0]) for row in rows]
+        return [self._summary_from_record_json(row[0]) for row in rows]
 
     def _summary_from_record_json(self, raw: str) -> RunSummary:
         record = RunRecord.model_validate_json(raw)
@@ -66,6 +79,8 @@ class StorageService:
             model_backend=record.model_backend,
             model_name=record.model_name,
             prompt_version=record.prompt_version,
+            retrieval_config_version=record.retrieval_config_version,
+            source_snapshot_id=record.source_snapshot_id,
             scenario=record.scenario,
             outcome=record.outcome,
             online_score_total=record.online_score_total,
@@ -106,6 +121,39 @@ class StorageService:
         return {
             "summary": OfflineEvalSummary.model_validate_json(summary_row[0]),
             "case_results": [OfflineEvalCaseResult.model_validate_json(row[0]) for row in case_rows],
+        }
+
+    def write_offline_comparison(
+        self,
+        summary: OfflineComparisonSummary,
+        case_deltas: list[OfflineComparisonCaseDelta],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO offline_comparison_runs VALUES (?, ?, ?)",
+                (summary.comparison_id, summary.created_at.isoformat(), summary.model_dump_json()),
+            )
+            for delta in case_deltas:
+                conn.execute(
+                    "INSERT OR REPLACE INTO offline_comparison_cases VALUES (?, ?, ?)",
+                    (summary.comparison_id, delta.case_id, delta.model_dump_json()),
+                )
+
+    def get_offline_comparison(self, comparison_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            summary_row = conn.execute(
+                "SELECT summary_json FROM offline_comparison_runs WHERE comparison_id = ?",
+                (comparison_id,),
+            ).fetchone()
+            delta_rows = conn.execute(
+                "SELECT delta_json FROM offline_comparison_cases WHERE comparison_id = ? ORDER BY case_id",
+                (comparison_id,),
+            ).fetchall()
+        if not summary_row:
+            return None
+        return {
+            "summary": OfflineComparisonSummary.model_validate_json(summary_row[0]),
+            "case_deltas": [OfflineComparisonCaseDelta.model_validate_json(row[0]) for row in delta_rows],
         }
 
     def create_review_item(self, item: ReviewQueueItem) -> None:

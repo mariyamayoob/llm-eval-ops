@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from model.contracts import (
     FailureReason,
+    RefusalReason,
     ReviewDecision,
     ReviewPriority,
     RiskBand,
@@ -12,6 +13,23 @@ from model.contracts import (
 )
 
 
+CORE_TOTAL_WEIGHTS = {
+    "groundedness": 0.30,
+    "citation_validity": 0.20,
+    "policy_adherence": 0.20,
+    "format_validity": 0.15,
+    "retrieval_support": 0.15,
+}
+
+REVIEW_BLOCKING_FLAGS = {
+    SuspiciousFlag.ANSWER_WITHOUT_CITATIONS,
+    SuspiciousFlag.CITATIONS_NOT_IN_RETRIEVAL,
+    SuspiciousFlag.POSSIBLE_POLICY_MISMATCH,
+    SuspiciousFlag.REPAIR_ATTEMPTED,
+    SuspiciousFlag.UNSUPPORTED_CLAIM_SIGNAL,
+}
+
+
 class OnlineScoringService:
     def score(
         self,
@@ -19,8 +37,9 @@ class OnlineScoringService:
         structured_output: StructuredPolicyOutput,
         validation: ValidationResult,
         retrieval_stats,
-        prompt_version: str,
     ) -> tuple[ScoreBreakdown, list[SuspiciousFlag], RiskBand, ReviewDecision]:
+        # Keep runtime triage focused on the public-repo story:
+        # is the response valid, grounded, and safe enough to trust right now?
         groundedness = 1.0 if FailureReason.UNSUPPORTED_ANSWER not in validation.failure_reasons and not retrieval_stats.retrieval_empty else 0.35
         citation_validity = 1.0 if validation.citation_valid else 0.0
         policy_adherence = 1.0
@@ -31,13 +50,11 @@ class OnlineScoringService:
         format_validity = 1.0 if validation.structure_valid else 0.0
         retrieval_support = self._retrieval_support(retrieval_stats)
         total = round(
-            0.25 * groundedness
-            + 0.15 * citation_validity
-            + 0.20 * policy_adherence
-            + 0.10 * brand_voice
-            + 0.10 * tone
-            + 0.10 * format_validity
-            + 0.10 * retrieval_support,
+            CORE_TOTAL_WEIGHTS["groundedness"] * groundedness
+            + CORE_TOTAL_WEIGHTS["citation_validity"] * citation_validity
+            + CORE_TOTAL_WEIGHTS["policy_adherence"] * policy_adherence
+            + CORE_TOTAL_WEIGHTS["format_validity"] * format_validity
+            + CORE_TOTAL_WEIGHTS["retrieval_support"] * retrieval_support,
             4,
         )
         scores = ScoreBreakdown(
@@ -54,9 +71,9 @@ class OnlineScoringService:
         flags: list[SuspiciousFlag] = []
         if not structured_output.refusal and not structured_output.citations:
             flags.append(SuspiciousFlag.ANSWER_WITHOUT_CITATIONS)
-        if not validation.citation_valid:
+        if structured_output.citations and not validation.citation_valid:
             flags.append(SuspiciousFlag.CITATIONS_NOT_IN_RETRIEVAL)
-        if structured_output.confidence >= 0.9 and retrieval_support < 0.4:
+        if not structured_output.refusal and structured_output.confidence >= 0.9 and retrieval_support < 0.4:
             flags.append(SuspiciousFlag.HIGH_CONFIDENCE_LOW_SUPPORT)
         if FailureReason.UNSUPPORTED_ANSWER in validation.failure_reasons or FailureReason.CONFLICTING_EVIDENCE in validation.failure_reasons:
             flags.append(SuspiciousFlag.POSSIBLE_POLICY_MISMATCH)
@@ -66,18 +83,32 @@ class OnlineScoringService:
             flags.append(SuspiciousFlag.REPAIR_ATTEMPTED)
         if FailureReason.UNSUPPORTED_ANSWER in validation.failure_reasons:
             flags.append(SuspiciousFlag.UNSUPPORTED_CLAIM_SIGNAL)
-        if structured_output.refusal and retrieval_support >= 0.75:
+        if (
+            structured_output.refusal
+            and retrieval_support >= 0.75
+            and structured_output.refusal_reason != RefusalReason.CONFLICTING_EVIDENCE
+        ):
             flags.append(SuspiciousFlag.REFUSAL_DESPITE_STRONG_RETRIEVAL)
         flags = list(dict.fromkeys(flags))
 
-        critical_flags = set(flags)
-        if critical_flags:
+        blocking_flags = [flag for flag in flags if flag in REVIEW_BLOCKING_FLAGS]
+        advisory_flags = [flag for flag in flags if flag not in REVIEW_BLOCKING_FLAGS]
+
+        if blocking_flags:
             risk_band = RiskBand.HIGH
-            review = ReviewDecision(review_required=True, review_priority=ReviewPriority.HIGH, human_review_reason="Critical review flags were raised.")
-        elif total < 0.70:
+            review = ReviewDecision(
+                review_required=True,
+                review_priority=ReviewPriority.HIGH,
+                human_review_reason="Core validation or grounding checks require human review.",
+            )
+        elif total < 0.60:
             risk_band = RiskBand.HIGH
-            review = ReviewDecision(review_required=True, review_priority=ReviewPriority.HIGH, human_review_reason="Online score is below the production review threshold.")
-        elif total < 0.85:
+            review = ReviewDecision(
+                review_required=True,
+                review_priority=ReviewPriority.HIGH,
+                human_review_reason="Core runtime trust score is below the review threshold.",
+            )
+        elif advisory_flags or total < 0.85:
             risk_band = RiskBand.MEDIUM
             review = ReviewDecision(review_required=False)
         else:

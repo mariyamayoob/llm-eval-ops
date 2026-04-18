@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from evals.contracts import ReviewerAnnotation
+from evals.contracts import CaseSet, OfflineComparisonRequest, ReviewerAnnotation
 from evals.runner import OfflineEvalRunner
 from model.contracts import ModelBackend, PolicyDeskAssistantRequest, PolicyDeskAssistantResponse
 from observability.tracing import TraceRecorder
+from prompts.registry import DEFAULT_PROMPT_VERSION, PROMPT_VERSION_PATTERN
 from services.kb_service import KBService
 from services.metrics_service import OnlineScoringService
 from services.model_service import ModelService
@@ -23,6 +24,7 @@ def create_app(
     kb_path: str = "data/kb.json",
     db_path: str = "data/policy_desk.db",
     eval_dataset_path: str = "data/eval_dataset.json",
+    offline_gate_policy_path: str = "data/offline_gate_policy.json",
 ) -> FastAPI:
     app = FastAPI(title="Policy Desk Assistant", version="1.0.0")
 
@@ -43,7 +45,12 @@ def create_app(
         run_service=run_service,
         tracer=tracer,
     )
-    eval_runner = OfflineEvalRunner(policy_service=policy_service, storage=storage_service, dataset_path=eval_dataset_path)
+    eval_runner = OfflineEvalRunner(
+        policy_service=policy_service,
+        storage=storage_service,
+        dataset_path=eval_dataset_path,
+        gate_policy_path=offline_gate_policy_path,
+    )
     ui_service = UIService()
 
     app.state.policy_service = policy_service
@@ -76,9 +83,22 @@ def create_app(
     @app.get(f"{BASE_PATH}/evals/offline")
     def run_offline_evals(
         model_backend: ModelBackend = Query(default=ModelBackend.MOCK),
-        prompt_version: str = Query(default="qa-prompt:v1"),
+        prompt_version: str = Query(default=DEFAULT_PROMPT_VERSION, pattern=PROMPT_VERSION_PATTERN),
+        retrieval_config_version: str = Query(default="retrieval-config:v1"),
+        source_snapshot_id: str = Query(default="kb-snapshot:current"),
+        case_set: CaseSet = Query(default=CaseSet.FULL),
     ):
-        return eval_runner.run(model_backend=model_backend, prompt_version=prompt_version)
+        return eval_runner.run(
+            model_backend=model_backend,
+            prompt_version=prompt_version,
+            retrieval_config_version=retrieval_config_version,
+            source_snapshot_id=source_snapshot_id,
+            case_set=case_set,
+        )
+
+    @app.post(f"{BASE_PATH}/evals/offline/compare")
+    def compare_offline_evals(request: OfflineComparisonRequest):
+        return eval_runner.compare(request)
 
     @app.get(f"{BASE_PATH}/evals/offline/{{eval_run_id}}")
     def get_offline_eval(eval_run_id: str):
@@ -86,6 +106,13 @@ def create_app(
         if payload is None:
             raise HTTPException(status_code=404, detail={"eval_run_id": eval_run_id, "message": "Offline eval run not found"})
         return ui_service.offline_eval_summary(payload["summary"], payload["case_results"])
+
+    @app.get(f"{BASE_PATH}/evals/offline/comparisons/{{comparison_id}}")
+    def get_offline_comparison(comparison_id: str):
+        payload = storage_service.get_offline_comparison(comparison_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail={"comparison_id": comparison_id, "message": "Offline comparison run not found"})
+        return ui_service.offline_comparison_summary(payload["summary"], payload["case_deltas"])
 
     @app.get(f"{BASE_PATH}/review-queue")
     def review_queue():

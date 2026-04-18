@@ -12,7 +12,7 @@ from model.contracts import (
     ScenarioName,
     StructuredPolicyOutput,
 )
-from prompts.registry import PROMPT_REGISTRY, REPAIR_PROMPT
+from prompts.registry import PromptProfile, REPAIR_PROMPT, get_prompt_profile
 
 
 @dataclass
@@ -29,7 +29,7 @@ class ModelAdapter(Protocol):
     def generate(self, *, question: str, retrieved_chunks: list[dict[str, object]], prompt_version: str, scenario: ScenarioName) -> str:
         ...
 
-    def repair(self, raw_text: str, prompt_version: str) -> str:
+    def repair(self, raw_text: str) -> str:
         ...
 
 
@@ -38,11 +38,14 @@ class MockModelAdapter:
     model_name = "mock-policy-model"
 
     def generate(self, *, question: str, retrieved_chunks: list[dict[str, object]], prompt_version: str, scenario: ScenarioName) -> str:
+        prompt = get_prompt_profile(prompt_version)
         if scenario == ScenarioName.SLOW_RESPONSE:
             time.sleep(0.05)
         if scenario == ScenarioName.MALFORMED_JSON:
             return "{'answer': 'Unused service credits expire 45 days after they are issued.', 'citations': ['policy-credit-expiry-45'], 'evidence_summary': [{'chunk_id': 'policy-credit-expiry-45', 'title': 'Credit expiry', 'support_snippet': 'Credits expire 45 days after issue.', 'relevance_score': 0.91}], 'refusal': false, 'refusal_reason': null, 'missing_or_conflicting_evidence_summary': null, 'confidence': 0.87}"
         if scenario == ScenarioName.RETRIEVAL_MISS:
+            if prompt.missing_evidence_mode == "best_effort_answer":
+                return self._best_effort_missing_evidence_response(prompt)
             return json.dumps(
                 {
                     "answer": "",
@@ -55,6 +58,8 @@ class MockModelAdapter:
                 }
             )
         if scenario == ScenarioName.CONFLICTING_EVIDENCE:
+            if prompt.conflict_mode == "best_effort_answer":
+                return self._best_effort_conflict_response(prompt, retrieved_chunks)
             return json.dumps(
                 {
                     "answer": "",
@@ -92,11 +97,11 @@ class MockModelAdapter:
             "refusal": False,
             "refusal_reason": None,
             "missing_or_conflicting_evidence_summary": None,
-            "confidence": 0.92 if prompt_version == "qa-prompt:v1" else 0.88,
+            "confidence": 0.92,
         }
         return json.dumps(payload)
 
-    def repair(self, raw_text: str, prompt_version: str) -> str:
+    def repair(self, raw_text: str) -> str:
         return raw_text.replace("'", '"').replace(": false", ": false").replace(": null", ": null")
 
     def _evidence_summary(self, retrieved_chunks: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -122,8 +127,54 @@ class MockModelAdapter:
             "policy-overtime-approval-pre": "Overtime must be pre-approved by a manager before hours are worked.",
             "policy-credit-expiry-45": "Unused service credits expire 45 days after they are issued.",
             "policy-escalation-sensitive-2h": "Sensitive account changes should be escalated to the policy desk within 2 hours.",
+            "policy-receipts-required-25": "Receipts are required for reimbursement claims of 25 dollars or more.",
+            "policy-vpn-resync": "Support should clear cached credentials, confirm multifactor enrollment, and retry from the managed VPN client.",
         }
         return mapping.get(citation_id, "The retrieved policy supports a bounded answer to the question.")
+
+    def _best_effort_missing_evidence_response(self, prompt: PromptProfile) -> str:
+        citation_id = prompt.placeholder_citation_id or "best-effort-policy"
+        title = prompt.placeholder_evidence_title or "Best effort guidance"
+        return json.dumps(
+            {
+                "answer": "Pet insurance reimbursement is usually handled through a standard claims review path.",
+                "citations": [citation_id],
+                "evidence_summary": [
+                    {
+                        "chunk_id": citation_id,
+                        "title": title,
+                        "support_snippet": "No retrieved snippets were available, so this answer is being provided as best effort.",
+                        "relevance_score": 0.21,
+                    }
+                ],
+                "refusal": False,
+                "refusal_reason": None,
+                "missing_or_conflicting_evidence_summary": None,
+                "confidence": 0.84,
+            }
+        )
+
+    def _best_effort_conflict_response(self, prompt: PromptProfile, retrieved_chunks: list[dict[str, object]]) -> str:
+        citation_id = str(retrieved_chunks[0]["id"]) if retrieved_chunks else (prompt.placeholder_citation_id or "best-effort-policy")
+        evidence = self._evidence_summary(retrieved_chunks) if retrieved_chunks else [
+            {
+                "chunk_id": prompt.placeholder_citation_id or "best-effort-policy",
+                "title": prompt.placeholder_evidence_title or "Best effort guidance",
+                "support_snippet": "Conflicting evidence was present, but the assistant still chose a most likely policy path.",
+                "relevance_score": 0.22,
+            }
+        ]
+        return json.dumps(
+            {
+                "answer": "The most likely answer is the standard 30-day refund window.",
+                "citations": [citation_id],
+                "evidence_summary": evidence,
+                "refusal": False,
+                "refusal_reason": None,
+                "missing_or_conflicting_evidence_summary": None,
+                "confidence": 0.8,
+            }
+        )
 
 
 class OpenAIModelAdapter:
@@ -146,19 +197,27 @@ class OpenAIModelAdapter:
         if scenario == ScenarioName.SLOW_RESPONSE:
             time.sleep(0.05)
         schema = self._strict_json_schema(StructuredPolicyOutput.model_json_schema())
-        prompt = PROMPT_REGISTRY[prompt_version]
+        prompt = get_prompt_profile(prompt_version)
         input_payload = {
             "question": question,
             "retrieved_chunks": [
                 {"id": chunk["id"], "title": chunk["title"], "body": chunk["body"][:240]}
                 for chunk in retrieved_chunks
             ],
-            "instructions": prompt["instructions"],
+            "prompt_profile": {
+                "label": prompt.label,
+                "description": prompt.description,
+                "missing_evidence_mode": prompt.missing_evidence_mode,
+                "conflict_mode": prompt.conflict_mode,
+                "placeholder_citation_id": prompt.placeholder_citation_id,
+                "placeholder_evidence_title": prompt.placeholder_evidence_title,
+            },
+            "instructions": prompt.instructions,
         }
         response = self._client.responses.create(
             model=self.model_name,
             input=[
-                {"role": "system", "content": prompt["system"]},
+                {"role": "system", "content": prompt.system},
                 {"role": "user", "content": json.dumps(input_payload)},
             ],
             text={
@@ -175,7 +234,7 @@ class OpenAIModelAdapter:
             raise ValueError("OpenAI response did not contain output_text")
         return output_text
 
-    def repair(self, raw_text: str, prompt_version: str) -> str:
+    def repair(self, raw_text: str) -> str:
         response = self._client.responses.create(
             model=self.model_name,
             input=[
@@ -235,9 +294,9 @@ class ModelService:
         )
         return ModelCallResult(backend=adapter.backend, model_name=adapter.model_name, raw_text=raw_text)
 
-    def repair(self, *, model_backend: ModelBackend, raw_text: str, prompt_version: str) -> str:
+    def repair(self, *, model_backend: ModelBackend, raw_text: str) -> str:
         adapter = self._select_adapter(model_backend)
-        return adapter.repair(raw_text, prompt_version)
+        return adapter.repair(raw_text)
 
     def _select_adapter(self, model_backend: ModelBackend) -> ModelAdapter:
         if model_backend == ModelBackend.OPENAI:

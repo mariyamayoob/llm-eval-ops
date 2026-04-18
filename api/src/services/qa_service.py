@@ -63,7 +63,11 @@ class PolicyDeskService:
         retrieved_chunks_payload: list[dict[str, object]] = []
 
         retrieve_span = self.tracer.start_span(trace_id, "retrieve", scenario=request.scenario.value)
-        retrieved_chunks, retrieval_stats = self.retrieval_service.retrieve(request.question, request.scenario.value)
+        retrieved_chunks, retrieval_stats = self.retrieval_service.retrieve(
+            request.question,
+            request.scenario.value,
+            request.retrieval_config_version,
+        )
         retrieved_ids = [item.id for item in retrieved_chunks]
         retrieved_chunks_payload = self.kb_service.get_chunks(retrieved_ids)
         timings["retrieve"] = retrieve_span.finish(
@@ -91,7 +95,6 @@ class PolicyDeskService:
         structured_output, validation = self.validation_service.parse_and_validate(
             raw_output=model_result.raw_text,
             model_backend=request.model_backend,
-            prompt_version=request.prompt_version,
             retrieved_ids=retrieved_ids,
             cited_bodies=cited_bodies,
         )
@@ -113,7 +116,6 @@ class PolicyDeskService:
             structured_output=structured_output,
             validation=validation,
             retrieval_stats=retrieval_stats,
-            prompt_version=request.prompt_version,
         )
         timings["online_score"] = score_span.finish(
             online_score_total=score_breakdown.total,
@@ -172,6 +174,8 @@ class PolicyDeskService:
             model_backend=model_result.backend,
             model_name=model_result.model_name,
             prompt_version=request.prompt_version,
+            retrieval_config_version=request.retrieval_config_version,
+            source_snapshot_id=request.source_snapshot_id,
             question_hash=question_hash,
             question_len=len(request.question),
             scenario=request.scenario,
@@ -207,10 +211,10 @@ class PolicyDeskService:
         return response
 
     def _choose_outcome(self, structured_output: StructuredPolicyOutput, review_decision: ReviewDecision) -> Outcome:
-        if review_decision.review_required:
-            return Outcome.HUMAN_REVIEW_RECOMMENDED
         if structured_output.refusal:
             return Outcome.REFUSED_MORE_EVIDENCE_NEEDED
+        if review_decision.review_required:
+            return Outcome.HUMAN_REVIEW_RECOMMENDED
         return Outcome.SUPPORTED_ANSWER
 
     def _build_response(
@@ -234,6 +238,8 @@ class PolicyDeskService:
             "model_backend": model_result.backend,
             "model_name": model_result.model_name,
             "prompt_version": request.prompt_version,
+            "retrieval_config_version": request.retrieval_config_version,
+            "source_snapshot_id": request.source_snapshot_id,
             "outcome": outcome,
             "online_score_total": score_breakdown.total,
             "risk_band": risk_band,
@@ -281,7 +287,7 @@ class PolicyDeskService:
         elif retrieval_stats.similarity_max < 0.2:
             failure_reasons.append(FailureReason.WEAK_RETRIEVAL_HIT)
             failure_categories.append(FailureCategory.RETRIEVAL_FAILURE)
-        if scenario == ScenarioName.WRONG_REFUSAL or (structured_output.refusal and retrieval_stats.similarity_max >= 0.25):
+        if scenario == ScenarioName.WRONG_REFUSAL:
             failure_reasons.append(FailureReason.WRONG_REFUSAL)
             failure_categories.append(FailureCategory.POLICY_FAILURE)
         if structured_output.refusal and structured_output.refusal_reason == RefusalReason.CONFLICTING_EVIDENCE:

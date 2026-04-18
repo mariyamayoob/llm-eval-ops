@@ -25,12 +25,27 @@ def test_refused_more_evidence_needed_path(client):
             "question": "What is the policy for pet insurance reimbursement?",
             "scenario": "retrieval_miss",
             "model_backend": "mock",
-            "prompt_version": "qa-prompt:v2",
+            "prompt_version": "qa-prompt:v1",
         },
     )
     payload = response.json()
     assert payload["outcome"] == "refused_more_evidence_needed"
     assert payload["refusal_reason"] == "insufficient_evidence"
+
+
+def test_sloppy_prompt_routes_missing_evidence_to_review(client):
+    response = client.post(
+        "/policy-desk-assistant/respond",
+        json={
+            "question": "What is the policy for pet insurance reimbursement?",
+            "scenario": "retrieval_miss",
+            "model_backend": "mock",
+            "prompt_version": "qa-prompt:v2",
+        },
+    )
+    payload = response.json()
+    assert payload["outcome"] == "human_review_recommended"
+    assert payload["review_required"] is True
 
 
 def test_human_review_recommended_path(client):
@@ -71,7 +86,7 @@ def test_conflicting_evidence_handling(client):
             "question": "How long does a customer have to request a refund?",
             "scenario": "conflicting_evidence",
             "model_backend": "mock",
-            "prompt_version": "qa-prompt:v2",
+            "prompt_version": "qa-prompt:v1",
         },
     )
     payload = response.json()
@@ -111,3 +126,19 @@ def test_trace_id_and_run_persistence(client):
     body = run.json()
     assert body["run"]["retrieved_ids"]
     assert body["run"]["step_timings_ms"]
+
+
+def test_unsupported_prompt_versions_are_rejected(client):
+    respond = client.post(
+        "/policy-desk-assistant/respond",
+        json={
+            "question": "How long does a customer have to request a refund?",
+            "scenario": "normal",
+            "model_backend": "mock",
+            "prompt_version": "qa-prompt:v6",
+        },
+    )
+    assert respond.status_code == 422
+
+    offline = client.get("/policy-desk-assistant/evals/offline?model_backend=mock&prompt_version=qa-prompt:v6")
+    assert offline.status_code == 422

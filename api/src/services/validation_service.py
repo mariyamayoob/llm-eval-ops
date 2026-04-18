@@ -28,7 +28,6 @@ class ValidationService:
         *,
         raw_output: str,
         model_backend: ModelBackend,
-        prompt_version: str,
         retrieved_ids: list[str],
         cited_bodies: dict[str, str],
     ) -> tuple[StructuredPolicyOutput, ValidationResult]:
@@ -43,7 +42,7 @@ class ValidationService:
             failure_categories.append(FailureCategory.GENERATION_FAILURE)
             repair_attempted = True
             try:
-                repaired = self.model_service.repair(model_backend=model_backend, raw_text=raw_output, prompt_version=prompt_version)
+                repaired = self.model_service.repair(model_backend=model_backend, raw_text=raw_output)
                 payload = json.loads(repaired)
             except Exception:
                 failure_reasons.append(FailureReason.REPAIR_EXHAUSTED)

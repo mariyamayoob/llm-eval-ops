@@ -16,8 +16,8 @@ class KBService:
         return list(self._chunks)
 
     def get_chunks(self, ids: list[str]) -> list[dict[str, object]]:
-        wanted = set(ids)
-        return [chunk for chunk in self.load() if chunk["id"] in wanted]
+        by_id = {chunk["id"]: chunk for chunk in self.load()}
+        return [by_id[chunk_id] for chunk_id in ids if chunk_id in by_id]
 
     def scenario_chunks(self, scenario: str) -> list[dict[str, object]]:
         chunks = self.load()

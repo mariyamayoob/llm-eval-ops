@@ -15,7 +15,12 @@ class RetrievalService:
         self.kb_service = kb_service
         self.top_k = top_k
 
-    def retrieve(self, question: str, scenario: str) -> tuple[list[RetrievedChunk], RetrievalStats]:
+    def retrieve(
+        self,
+        question: str,
+        scenario: str,
+        retrieval_config_version: str | None = None,
+    ) -> tuple[list[RetrievedChunk], RetrievalStats]:
         if scenario == "retrieval_miss":
             return [], RetrievalStats(
                 top_k=self.top_k,

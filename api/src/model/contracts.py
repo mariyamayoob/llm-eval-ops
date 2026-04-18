@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
+from prompts.registry import DEFAULT_PROMPT_VERSION, PROMPT_VERSION_PATTERN
 
 
 class ModelBackend(str, Enum):
@@ -101,7 +102,9 @@ class PolicyDeskAssistantRequest(BaseModel):
     question: str = Field(..., min_length=1)
     scenario: ScenarioName = ScenarioName.NORMAL
     model_backend: ModelBackend = ModelBackend.MOCK
-    prompt_version: str = "qa-prompt:v1"
+    prompt_version: str = Field(default=DEFAULT_PROMPT_VERSION, pattern=PROMPT_VERSION_PATTERN)
+    retrieval_config_version: str = "retrieval-config:v1"
+    source_snapshot_id: str = "kb-snapshot:current"
 
 
 class RetrievedChunk(BaseModel):
@@ -189,6 +192,8 @@ class PolicyDeskAssistantResponse(BaseModel):
     model_backend: ModelBackend
     model_name: str
     prompt_version: str
+    retrieval_config_version: str = "retrieval-config:v1"
+    source_snapshot_id: str = "kb-snapshot:current"
     outcome: Outcome
     online_score_total: float = Field(ge=0.0, le=1.0)
     risk_band: RiskBand
@@ -227,6 +232,8 @@ class RunRecord(BaseModel):
     model_backend: ModelBackend
     model_name: str
     prompt_version: str
+    retrieval_config_version: str = "retrieval-config:v1"
+    source_snapshot_id: str = "kb-snapshot:current"
     question_hash: str
     question_len: int
     scenario: ScenarioName
@@ -253,6 +260,8 @@ class RunSummary(BaseModel):
     model_backend: ModelBackend
     model_name: str
     prompt_version: str
+    retrieval_config_version: str = "retrieval-config:v1"
+    source_snapshot_id: str = "kb-snapshot:current"
     scenario: ScenarioName
     outcome: Outcome
     online_score_total: float
