@@ -109,6 +109,30 @@ def test_review_queue_item_creation(client):
     assert any(item["review_queue_item_id"] == item_id for item in queue.json())
 
 
+def test_review_queue_prune_deletes_old_pending_runtime_items(client):
+    for i in range(25):
+        response = client.post(
+            "/policy-desk-assistant/respond",
+            json={
+                "question": f"How long does a customer have to request a refund? Case {i}",
+                "scenario": "unsupported_answer",
+                "model_backend": "mock",
+                "prompt_version": "qa-prompt:v1",
+            },
+        )
+        assert response.status_code == 200
+
+    pruned = client.post("/policy-desk-assistant/review-queue/prune?max_open_runtime_items=5")
+    assert pruned.status_code == 200
+    payload = pruned.json()
+    assert payload["max_open_runtime_items"] == 5
+    assert payload["deleted_count"] >= 20
+
+    queue = client.get("/policy-desk-assistant/review-queue")
+    assert queue.status_code == 200
+    assert len(queue.json()) == 5
+
+
 def test_trace_id_and_run_persistence(client):
     response = client.post(
         "/policy-desk-assistant/respond",

@@ -17,7 +17,8 @@ from main import create_app
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
+    monkeypatch.setenv("LLM_JUDGE_ENABLED", "false")
     workspace_tmp = ROOT / "test_artifacts" / str(uuid.uuid4())
     workspace_tmp.mkdir(parents=True, exist_ok=True)
     db_path = workspace_tmp / "policy_desk.db"

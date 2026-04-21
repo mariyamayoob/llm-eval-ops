@@ -45,6 +45,20 @@ class ReviewPriority(str, Enum):
     HIGH = "high"
 
 
+class FeedbackEventType(str, Enum):
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
+    REGENERATE = "regenerate"
+    CLARIFICATION_FOLLOWUP = "clarification_followup"
+    ABANDON = "abandon"
+    REVIEWER_CONFIRMED_ISSUE = "reviewer_confirmed_issue"
+
+
+class UserFeedbackEventType(str, Enum):
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
+
+
 class SuspiciousFlag(str, Enum):
     ANSWER_WITHOUT_CITATIONS = "answer_without_citations"
     CITATIONS_NOT_IN_RETRIEVAL = "citations_not_in_retrieval"
@@ -92,11 +106,16 @@ class FinalDisposition(str, Enum):
     REJECTED_RESPONSE = "rejected_response"
 
 
+class AlertStatus(str, Enum):
+    OK = "ok"
+    WATCH = "watch"
+    ACTION_REQUIRED = "action_required"
+
+
 class Difficulty(str, Enum):
     EASY = "easy"
     MEDIUM = "medium"
     HARD = "hard"
-
 
 class PolicyDeskAssistantRequest(BaseModel):
     question: str = Field(..., min_length=1)
@@ -229,6 +248,7 @@ class RunRecord(BaseModel):
     run_id: str
     trace_id: str
     created_at: datetime
+    question: str | None = None
     model_backend: ModelBackend
     model_name: str
     prompt_version: str
@@ -278,6 +298,143 @@ class TraceSummary(BaseModel):
     prompt_version: str
     total_latency_ms: float
     suspicious_flags: list[SuspiciousFlag] = Field(default_factory=list)
+
+
+class RuntimeFeedbackRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    event_type: UserFeedbackEventType
+    session_id: str | None = None
+    event_value: str | None = None
+
+
+class RuntimeFeedbackEvent(BaseModel):
+    event_id: str
+    run_id: str
+    session_id: str | None = None
+    event_type: FeedbackEventType
+    event_value: str | None = None
+    created_at: datetime
+    model_backend: ModelBackend
+    prompt_version: str
+    response_outcome: Outcome
+    risk_band: RiskBand
+
+
+class LLMJudgeStatus(str, Enum):
+    QUEUED = "queued"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class LLMJudgeAssessment(BaseModel):
+    supportedness_score: float = Field(ge=0.0, le=1.0)
+    policy_alignment_score: float = Field(ge=0.0, le=1.0)
+    response_mode_score: float = Field(ge=0.0, le=1.0)
+    overall_score: float = Field(ge=0.0, le=1.0)
+    human_review_recommended: bool
+    human_review_reason: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str
+
+
+class LLMJudgeRecord(BaseModel):
+    judge_id: str
+    run_id: str
+    created_at: datetime
+    completed_at: datetime | None = None
+    status: LLMJudgeStatus
+    judge_model: str
+    sampling_rate: float = Field(ge=0.0, le=1.0)
+    model_backend: ModelBackend
+    prompt_version: str
+    response_outcome: Outcome
+    risk_band: RiskBand
+    openai_response_id: str | None = None
+    review_queue_item_id: str | None = None
+    assessment: LLMJudgeAssessment | None = None
+    error_message: str | None = None
+
+
+class OnlineMetricGroup(BaseModel):
+    group_key: str
+    total_runs: int
+    total_feedback_events: int
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    risk_band_counts: dict[str, int] = Field(default_factory=dict)
+    avg_groundedness_proxy_score: float = Field(ge=0.0, le=1.0)
+    avg_citation_validity_score: float = Field(ge=0.0, le=1.0)
+    avg_policy_adherence_score: float = Field(ge=0.0, le=1.0)
+    avg_format_validity_score: float = Field(ge=0.0, le=1.0)
+    avg_retrieval_support_score: float = Field(ge=0.0, le=1.0)
+    avg_brand_voice_score: float = Field(ge=0.0, le=1.0)
+    avg_tone_appropriateness_score: float = Field(ge=0.0, le=1.0)
+    avg_online_score_total: float = Field(ge=0.0, le=1.0)
+    review_recommended_rate: float = Field(ge=0.0, le=1.0)
+    supported_answer_rate: float = Field(ge=0.0, le=1.0)
+    invalid_output_rate: float = Field(ge=0.0, le=1.0)
+    thumbs_up_rate: float = Field(ge=0.0, le=1.0)
+    thumbs_down_rate: float = Field(ge=0.0, le=1.0)
+    high_risk_run_count: int
+
+
+class OnlineMetricsSummary(BaseModel):
+    window_start: datetime
+    window_end: datetime
+    total_runs: int
+    total_feedback_events: int
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    risk_band_counts: dict[str, int] = Field(default_factory=dict)
+    avg_groundedness_proxy_score: float = Field(ge=0.0, le=1.0)
+    avg_citation_validity_score: float = Field(ge=0.0, le=1.0)
+    avg_policy_adherence_score: float = Field(ge=0.0, le=1.0)
+    avg_format_validity_score: float = Field(ge=0.0, le=1.0)
+    avg_retrieval_support_score: float = Field(ge=0.0, le=1.0)
+    avg_brand_voice_score: float = Field(ge=0.0, le=1.0)
+    avg_tone_appropriateness_score: float = Field(ge=0.0, le=1.0)
+    avg_online_score_total: float = Field(ge=0.0, le=1.0)
+    review_recommended_rate: float = Field(ge=0.0, le=1.0)
+    supported_answer_rate: float = Field(ge=0.0, le=1.0)
+    invalid_output_rate: float = Field(ge=0.0, le=1.0)
+    thumbs_up_rate: float = Field(ge=0.0, le=1.0)
+    thumbs_down_rate: float = Field(ge=0.0, le=1.0)
+    high_risk_run_count: int
+    by_prompt_version: list[OnlineMetricGroup] = Field(default_factory=list)
+    by_model_backend: list[OnlineMetricGroup] = Field(default_factory=list)
+    by_response_outcome: list[OnlineMetricGroup] = Field(default_factory=list)
+    by_risk_band: list[OnlineMetricGroup] = Field(default_factory=list)
+
+
+class TriggeredAlert(BaseModel):
+    metric_name: str
+    severity: AlertStatus
+    observed_value: float
+    threshold_value: float
+    comparator: str
+    message: str
+
+
+class OnlineAlertPolicy(BaseModel):
+    policy_version: str = "online-alert-policy:v1"
+    max_invalid_output_rate: float = Field(default=0.15, ge=0.0, le=1.0)
+    max_review_recommended_rate: float = Field(default=0.35, ge=0.0, le=1.0)
+    max_thumbs_down_rate: float = Field(default=0.20, ge=0.0, le=1.0)
+    min_supported_answer_rate: float = Field(default=0.45, ge=0.0, le=1.0)
+    max_high_risk_run_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+
+
+class OnlineAlertEvaluation(BaseModel):
+    status: AlertStatus
+    triggered_alerts: list[TriggeredAlert] = Field(default_factory=list)
+    rollback_recommended: bool = False
+    rollback_reasons: list[str] = Field(default_factory=list)
+
+
+class OnlineSummarySnapshot(BaseModel):
+    summary: OnlineMetricsSummary
+    alert_evaluation: OnlineAlertEvaluation
+    worst_run_ids: list[str] = Field(default_factory=list)
+    review_queue_item_ids: list[str] = Field(default_factory=list)
 
 
 class ReviewQueueSummary(BaseModel):

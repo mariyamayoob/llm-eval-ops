@@ -135,6 +135,8 @@ class PolicyDeskService:
                 online_score_total=score_breakdown.total,
                 review_priority=review_decision.review_priority or ReviewPriority.HIGH,
                 suspicious_flags=suspicious_flags,
+                review_source="runtime",
+                review_reason=review_decision.human_review_reason,
             )
             self.run_service.enqueue_review(queue_item)
         timings["review_route"] = review_span.finish(
@@ -171,6 +173,7 @@ class PolicyDeskService:
             run_id=run_id,
             trace_id=trace_id,
             created_at=datetime.now(UTC),
+            question=request.question,
             model_backend=model_result.backend,
             model_name=model_result.model_name,
             prompt_version=request.prompt_version,

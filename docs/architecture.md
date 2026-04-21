@@ -1,375 +1,205 @@
 # Architecture
 
-## System overview
+## System Overview
 
-`llm-eval-ops` is a bounded LLM evaluation reference system rather than a generic chatbot. It answers synthetic policy questions over a synthetic knowledge base, validates structured outputs, scores every runtime response, routes risky cases to review, persists run records, and supports offline regression gating over labeled scenarios.
+`llm-eval-ops` is a bounded LLM evaluation reference system rather than a generic chatbot. It answers synthetic policy questions over a synthetic knowledge base, validates structured outputs, scores every runtime response, routes suspicious cases to review, persists run data in SQLite, and supports offline regression gating over a labeled dataset.
 
-Backend code lives under `api/src/`. The Streamlit demo UI lives under `ui/src/streamlit_app.py`.
-
-The codebase is intentionally organized around three practical questions:
+The repo is intentionally organized around three practical questions:
 
 1. Is the output valid and supported by retrieved evidence?
-2. Did the system choose the expected response?
-3. Did the candidate regress versus baseline?
+2. Did the system choose the expected response mode (answer vs abstain vs human review)?
+3. Did the candidate regress versus baseline on the same dataset?
 
-## Why this system exists
+Backend code lives under `api/src/`. The Streamlit demo UI lives under `ui/src/` (with `ui/src/streamlit_app.py` as the router and `ui/src/pages/` containing page modules).
 
-The point of this repo is to show that LLM applications should be evaluated in two different ways:
+## Runtime Outcomes
 
-- `online evals` run on every request and help decide whether a response should be trusted right now
-- `offline evals` run over a labeled synthetic dataset and help detect regressions after prompt, model, retrieval, or knowledge-base changes
+Runtime inference produces one of three outcomes:
 
-Together, they give the system a more production-like posture:
+- `supported_answer`: answer is present, citations are present, and evidence summary exists.
+- `refused_more_evidence_needed`: refusal with an explicit refusal reason + evidence gap summary.
+- `human_review_recommended`: the system decided a human should inspect (based on suspicious flags / low score / boundary behavior).
 
-- online evals help contain risky runtime behavior
-- offline evals help compare versions and prevent silent regressions
-- reviewer outcomes can later be turned into new eval cases or prompt improvements
+Note: `review_required` is tracked separately as an operator signal; a “safe abstain” can still be safe even if review is suggested.
 
-## Runtime outcomes
+## Request Lifecycle (Online Inference)
 
-| Outcome | Meaning | Routing condition |
-| --- | --- | --- |
-| `supported_answer` | The system found enough evidence and no review trigger fired | grounded answer, valid structure, no critical flags |
-| `refused_more_evidence_needed` | The system could not answer safely | retrieval miss, conflicting evidence, or validated refusal |
-| `human_review_recommended` | The result was suspicious or intentionally escalated | critical flag, low online score, or boundary-sensitive behavior |
+Entry point: `POST /policy-desk-assistant/respond` (FastAPI in `api/src/main.py`).
 
-## Request lifecycle
+Main orchestration: `PolicyDeskService` (`api/src/services/qa_service.py`).
 
-1. `main.py` receives `POST /policy-desk-assistant/respond`.
-2. `PolicyDeskService` creates a `run_id`, `trace_id`, and question hash.
-3. `RetrievalService` performs deterministic lexical retrieval over `data/kb.json`.
-4. `ModelService` calls either the mock adapter or the optional OpenAI adapter.
-5. `ValidationService` parses output, attempts one repair if needed, checks citations and invariants, and records failure signals.
-6. `OnlineScoringService` computes per-run scores and suspicious flags.
-7. Review routing decides whether to create a review queue item.
-8. `StorageService` writes the run record and any review item to SQLite.
-9. `TraceRecorder` finalizes the step-level trace.
+High-level sequence:
 
-`retrieval_config_version` and `source_snapshot_id` flow through the request, response, stored run record, offline summaries, and comparison summaries. In the current demo they are traceability tags rather than active UI controls, and they do not switch between different KB files.
+1. Create `run_id`, `trace_id`, and a question hash.
+2. Retrieve evidence with deterministic lexical retrieval (`RetrievalService`).
+3. Call the model backend (`ModelService`) using a prompt profile (`prompt_version`).
+4. Parse + validate structured output (`ValidationService`).
+5. Compute runtime score breakdown, suspicious flags, and risk band (`OnlineScoringService`).
+6. Decide whether to enqueue a review item (runtime routing).
+7. Persist the run record (and review item if created) via `RunService` → `StorageService` (SQLite).
+8. Finalize the trace (`TraceRecorder`) with spans and summary fields.
 
-## Core modules
+Trace spans are recorded for: `retrieve`, `prompt_build`, `llm_call`, `output_parse`, `output_validate`, `output_repair`, `online_score`, `review_route`, and `persist_run`.
 
-- `api/src/model/`: request, response, scoring, run, and review contracts
-- `api/src/services/`: retrieval, model adapters, validation, scoring, storage, and orchestration
-- `api/src/observability/`: root traces and step-level spans
-- `api/src/prompts/`: two demo prompt profiles and the repair prompt
-- `api/src/evals/contracts.py`: eval dataset schema, run summaries, comparison summaries, and behavior taxonomy
-- `api/src/evals/scorers.py`: per-case offline scoring and blocker detection
-- `api/src/evals/gates.py`: gate policy loader, threshold resolution, weighted scoring, and hard-fail logic
-- `api/src/evals/runner.py`: single-run and comparison execution paths
+## Persistence (SQLite)
 
-## Online scoring
+SQLite is initialized by `StorageService` (`api/src/services/storage_service.py`). Key persisted entities:
 
-Online scoring runs on every request. It now emphasizes the repo's core trust story:
+- `run_records`: full run record JSON, indexed by `run_id`.
+- `review_queue`: review queue items (minimal workflow state + JSON payload).
+- `reviewer_annotations`: append-only reviewer updates (history).
+- `runtime_feedback_events`: user/operator feedback events linked to `run_id`.
+- `llm_judge_records`: async LLM-judge records linked to `run_id`.
+- `offline_eval_runs` / `offline_eval_cases`: offline eval summaries and per-case results.
+- `offline_comparison_runs` / `offline_comparison_cases`: baseline-vs-candidate comparisons.
 
-- valid structure and citations
-- grounded retrieval-backed content
-- policy and behavior safety signals
+This is a reference app: no external message bus, no distributed tracing backend, no streaming ingestion.
 
-It still computes tone and brand heuristics, but those are advisory rather than primary release blockers.
+## Review Queue
 
-Review routing is also intentionally separate from behavior scoring:
+Review items are created by multiple paths:
 
-- `review_required` means "a human may want to inspect this"
-- it does not automatically mean the system chose `human_review` as its behavior
-- safe abstains remain abstains in the core offline gate story
+- runtime routing (inline deterministic checks and suspicious flags)
+- online control plane auto-enqueue when a high-risk run receives thumbs-down feedback
+- online summary alert evaluation when status becomes `action_required` (enqueues “worst runs”)
+- LLM judge when it recommends human review (enqueues with source `llm_judge`)
 
-Online scoring produces:
+Dedupe is by `run_id` to avoid queue spam when multiple signals point to the same run.
 
-- `online_score_total`
+Reviewer updates are written via:
+
+- `POST /policy-desk-assistant/review-queue/{item_id}/annotate`
+
+The review correction signal is intentionally simple:
+
+- `should_have_outcome`: what the system should have returned (`supported_answer`, `refused_more_evidence_needed`, or `human_review_recommended`)
+- `should_have_response_text`: free-form reference text for humans (not scored by offline gates today)
+- `promote_to_offline_eval`: include this item in the offline export set (with demo-grade PII redaction)
+
+There is also a demo-only queue cleanup endpoint:
+
+- `POST /policy-desk-assistant/review-queue/prune?max_open_runtime_items=20`
+
+It deletes older untouched `pending` runtime items (never deletes `llm_judge` items). This exists to keep the UI usable for screenshots and demos; it is not a retention policy.
+
+## Offline Eval Harness
+
+Offline evals replay a labeled dataset through the same runtime pipeline and score results against a versioned gate policy.
+
+Key pieces:
+
+- Dataset: `data/eval_dataset.json` (`EvalCase` in `api/src/evals/contracts.py`)
+- Gate policy: `data/offline_gate_policy.json`
+- Scoring + blocker taxonomy: `api/src/evals/scorers.py`
+- Gate evaluation: `api/src/evals/gates.py`
+- Runner: `api/src/evals/runner.py`
+
+Offline endpoints:
+
+- `GET /policy-desk-assistant/evals/offline` (single-run summary + case results)
+- `POST /policy-desk-assistant/evals/offline/compare` (baseline vs candidate)
+- `GET /policy-desk-assistant/evals/offline/{eval_run_id}`
+- `GET /policy-desk-assistant/evals/offline/comparisons/{comparison_id}`
+
+Case sets:
+
+- `case_set=portable`: core release suite (works for both mock + OpenAI backends)
+- `case_set=full`: portable suite plus mock-only stress cases
+
+## Online Control Plane (Reference Implementation)
+
+The online control plane is a lightweight operator layer that rolls up recent runs + feedback into a business-readable summary, evaluates it against thresholds, and can open review items when the system drifts.
+
+Components:
+
+- Feedback ingestion and persistence (`OnlineControlPlaneService.record_feedback`)
+- Rolling summary over recent N runs (`OnlineControlPlaneService.build_live_summary`)
+- Alert policy evaluation based on `data/online_alert_policy.json`
+
+Endpoints:
+
+- `POST /policy-desk-assistant/feedback`
+- `GET /policy-desk-assistant/feedback`
+- `GET /policy-desk-assistant/feedback/summary`
+
+The summary is deterministic and intentionally small (counts + rates + average runtime scores) and also includes grouped metrics by:
+
+- `prompt_version`
+- `model_backend`
+- `response_outcome`
 - `risk_band`
-- `suspicious_flags`
-- `review_required`
 
-This is the runtime control layer. Its job is triage, not perfect judgment.
+`rollback_recommended` is only an operator recommendation signal. It does not perform traffic switching.
 
-## Offline eval dataset model
+## Async OpenAI Judge (Reference Layer)
 
-Offline eval cases are no longer just "question plus expected refusal boolean." Each case now carries enough metadata to support real regression gates:
+The judge is a small “LLM-as-judge” layer that samples stored runs (that were not already routed to human review), grades them against retrieved evidence, and optionally recommends human review.
 
-- `bucket_id` and `bucket_name`
-- `risk_tier`
-- `business_criticality`
-- `expected_behavior`
-- `refusal_reason_expected`
-- `retrieval_config_version`
-- `source_snapshot_id`
-- `label_notes`
-- `gate_group`
-- `owner`
-- `case_kind`
-- `supported_backends`
+Sampling:
 
-Legacy dataset rows still load because the case contract backfills missing fields from the older shape.
+- deterministic by `run_id`
+- 10% of `low` risk runs
+- 30% of `medium` risk runs
+- 100% of `high` risk runs
 
-Two case groupings matter in practice:
+Judge metrics:
 
-- `portable`: real end-to-end cases that both backends can run
-- `stress`: synthetic mock-only cases used to exercise failure modes like conflicting evidence, malformed output, or over-refusal
+- `supportedness_score`
+- `policy_alignment_score`
+- `response_mode_score`
+- `overall_score` (simple average)
 
-The current dataset buckets are:
+If the judge recommends human review, a review item is created with `review_source="llm_judge"`.
 
-- `direct-answerable`: normal answerable cases plus stress checks for wrong refusal and malformed output
-- `missing-evidence-abstain`: high-risk abstain behavior when retrieval is empty
-- `conflicting-evidence-refuse`: mock-only refusal behavior when evidence conflicts
-- `policy-boundary-escalation`: mock-only human-review behavior for ambiguous exception handling
-- `unsupported-claim-trap`: critical mock-only cases that hard-fail on unsupported claims
-- `tone-brand`: low-risk advisory quality coverage
+Endpoints:
 
-## Behavior taxonomy and blocker model
+- `GET /policy-desk-assistant/llm-judge`
+- `GET /policy-desk-assistant/llm-judge/{judge_id}`
+- `POST /policy-desk-assistant/llm-judge/run/{run_id}` (demo/operator override; bypasses sampling)
 
-Offline scoring now distinguishes the expected and actual behavior of a run:
+Environment flags:
 
-- `answer`
-- `abstain`
-- `clarify`
-- `refuse`
-- `human_review`
+- `OPENAI_API_KEY` enables judge calls when present
+- `LLM_JUDGE_ENABLED=true|false` (defaults to enabled if `OPENAI_API_KEY` is present)
+- `OPENAI_JUDGE_MODEL=...` (defaults to `gpt-5-mini`)
 
-Each case result stores:
+## Review → Offline Eval Export
 
-- `expected_behavior`
-- `actual_behavior`
-- `behavior_match`
-- `regression_blockers`
+To demonstrate how human review becomes future test coverage, the repo supports exporting “promoted” review items into a portable offline eval JSON file:
 
-Important blocker examples include:
+- `GET /policy-desk-assistant/offline-eval/export`
 
-- `unsafe_compliance`
-- `over_refusal`
-- `false_clarify`
-- `unnecessary_escalation`
-- `missed_human_review`
-- `unsupported_claim`
+This export:
 
-This matters because a safe abstain and an unsafe answer should not be treated as equivalent just because they happen to land on the same average score.
+- redacts obvious PII in the question (demo-grade, not a production DLP system)
+- includes `reference_response_text` for human context
+- sets `expected_behavior` based on `should_have_outcome`
 
-For the simplified public-repo story, the core gate treats `refuse` and `abstain` as the same no-answer behavior class. The exact refusal subtype can still be inspected, but it is not the main release contract.
+The offline gates do not score free-form reference text today; they score the labeled behavior expectations and other deterministic checks.
 
-Not every detected regression becomes a blocking comparison failure. The scorer records a wider set of blockers for inspection, while the gate policy decides which blocker dimensions count as release-blocking in a given bucket or risk tier.
+## Streamlit UI
 
-## Offline single-run evals
+The Streamlit UI is intentionally small and operator-oriented:
 
-Single-run offline evals are triggered through `GET /policy-desk-assistant/evals/offline`.
+- Inference (create a run + quick thumbs up/down feedback)
+- Run Explorer (inspect stored runs)
+- Offline Gates (single-run and baseline-vs-candidate comparisons)
+- Review Queue (reviewer correction + offline export)
+- Online Control (rolling metrics + alert panel + judge slice views)
 
-The runner:
+Code structure:
 
-- loads labeled synthetic cases from `data/eval_dataset.json`
-- executes them through the same runtime pipeline
-- scores output validity and evidence support
-- checks whether the system chose the expected response for the case
-- records unsupported claims and other blockers
-- computes weighted case scores using the gate policy
-- aggregates by scenario and by bucket
-- applies bucket-specific thresholds and hard-fail rules
-- stores eval summaries and case results in SQLite
+- `ui/src/streamlit_app.py`: routing only
+- `ui/src/pages/*.py`: one module per page
+- `ui/src/ui_api.py`, `ui/src/ui_config.py`, `ui/src/ui_utils.py`: shared helpers
 
-The single-run output answers: "Should this candidate clear the configured release gate on its own?"
+## Non-Goals
 
-The `case_set` input controls whether the runner evaluates:
+This repo intentionally does not implement:
 
-- `portable`: only the real end-to-end cases
-- `full`: portable cases plus mock-only stress cases
+- an experiment router / traffic splitting system
+- real rollback (traffic switching)
+- external queues (Kafka/Redis/etc.)
+- semantic drift detection / embeddings
+- production-grade PII detection and redaction
 
-The Streamlit UI surfaces these as `Core release suite` and `Stress demo suite`. The API default remains `full`, but the demoable release-gate path typically uses `portable`.
-
-The summary payload now includes:
-
-- `aggregate_metrics` with `valid_grounded_score`, `behavior_score`, `advisory_quality_score`, `weighted_overall`, and `pass_rate`
-- `by_bucket_breakdown` with per-bucket thresholds, blocker counts, and release decisions
-- `failure_taxonomy_counts` and `behavior_taxonomy_counts`
-- `worst_case_ids` and `skipped_cases`
-
-The Streamlit single-run screen is driven directly from that payload:
-
-- `render_story_cards()` turns `valid_grounded_score`, `behavior_score`, and `pass_rate` into the three top-line cards
-- the middle card caption is derived from bucket-level `behavior_match_rate * case_count`, which is why the UI shows counts such as `4/4 cases matched answer vs abstain/refuse/escalate`
-- the right card caption is derived from bucket-level `pass_rate * case_count`, which is why the UI shows counts such as `4/4 cases cleared thresholds with no blocking issues`
-- `render_release_banner()` then shows a separate `Release decision` metric and any `decision_reasons`
-- the page follows with `Core gate metrics`, `Advisory quality signals`, `Bucket gates`, `Worst cases`, and `All cases`
-
-## Offline comparison evals
-
-Comparison evals are triggered through `POST /policy-desk-assistant/evals/offline/compare`.
-
-The comparison runner:
-
-- runs a baseline config and a candidate config over the same dataset
-- requires both configs to use the same `case_set`
-- narrows comparison to the common supported cases when the two backends do not support the same stress cases
-- persists both underlying single-run evals
-- computes per-case deltas and bucket deltas
-- identifies new failures introduced by the candidate
-- identifies failures fixed by the candidate
-- produces a final release decision with reasons
-
-This output answers: "What got worse, what got better, and is the candidate safe to ship?"
-
-This avoids falsely counting backend-specific stress cases as regressions when comparing a portable OpenAI candidate against the mock baseline.
-
-The comparison summary also makes scope explicit through:
-
-- `compared_case_ids`
-- `excluded_case_ids`
-
-Advisory-only regressions can still appear in score deltas or worst-regression lists, but they do not count as `new_blocking_failures` unless the gate policy marks that blocker dimension as release-blocking.
-
-In the current UI, single-run offline results are summarized with three cards:
-
-- `Output validity & support`
-- `Expected response choice`
-- `Gate pass rate`
-
-Comparison results then add:
-
-- a four-card regression header for `Release decision`, `New failures`, `Fixed failures`, and `New blockers`
-- baseline and candidate story cards side by side
-- `Core deltas`
-- `Bucket regressions`
-- `New failures`
-- `Worst regressions`
-
-That makes the comparison screen readable as both an engineering tool and a demo surface.
-
-The prompt layer is intentionally minimal for the public demo:
-
-- `qa-prompt:v1` is the stable baseline
-- `qa-prompt:v2` is the new candidate
-
-Those prompt profiles are defined once in `api/src/prompts/registry.py`.
-
-The mock adapter reads the same structured profile fields that are passed to the OpenAI adapter, so the implementation stays readable and avoids hidden prompt-version tricks spread across the codebase.
-
-## Gate policy design
-
-The gate policy lives in `data/offline_gate_policy.json`.
-
-It supports:
-
-- global defaults
-- risk-tier-specific thresholds
-- bucket-specific thresholds
-- weighted dimensions
-- blocker dimensions
-- hard-fail rules
-
-The policy is intentionally lightweight JSON plus Pydantic validation. The goal is readability and inspectability, not a full policy engine.
-
-The current weighted dimensions are:
-
-- `citation_valid`
-- `retrieval_hit`
-- `behavior_match`
-- `answer_fact_match`
-- `unsupported_claim_penalty`
-- `policy_adherence_match`
-
-The default blocker dimensions are:
-
-- `behavior_mismatch`
-- `unsafe_compliance`
-- `unsupported_claim`
-
-Bucket and risk overlays then tighten those defaults for specific cases such as `policy-boundary-escalation` and `unsupported-claim-trap`.
-
-The current hard-fail rules are intentionally small and explicit:
-
-- `critical_any_blocker`
-- `unsupported_claim_hard_fail`
-- `safety_boundary_hard_fail`
-
-Tone and brand signals remain available for inspection, but they are not meant to dominate the release story.
-
-That separation is one of the stronger product qualities in the code right now: advisory quality metrics still show up in single-run and comparison views, but they do not automatically turn into blocking regressions unless the gate policy says they should.
-
-## Why averages are not enough
-
-Averages remain useful, but they are not the release contract.
-
-The release decision now combines:
-
-- weighted score thresholds
-- bucket pass-rate thresholds
-- behavior-match thresholds
-- blocker counts
-- hard-fail rules for critical buckets
-- new failures in comparison mode
-- new blocking failures in comparison mode
-
-This means score deltas remain informative, but the actual release verdict is driven by bucket thresholds and blocker policy rather than by a single average or by advisory quality drift alone.
-
-This is what makes the system behave like a real regression gate rather than a single flat score demo.
-
-The important simplification is that the public-facing explanation stays small even though the gate has policy detail underneath it:
-
-- output validity and support
-- expected response choice
-- gate pass rate for single-run views
-
-## Release decision categories
-
-Both single-run and comparison evals end in one of:
-
-- `pass`
-- `warn`
-- `fail`
-
-Decision payloads include:
-
-- `decision_reasons`
-- `failed_buckets`
-- `new_failures`
-- `new_blocking_failures`
-- `fixed_failures`
-
-## Review loop
-
-Suspicious runs are written to a review queue. Reviewers annotate them through `POST /policy-desk-assistant/review-queue/{item_id}/annotate`.
-
-In the current implementation, reviewer outcomes are stored and inspectable, but they do not automatically change prompts or datasets. The intended future loop is explicit:
-
-- reviewed failures become new offline eval cases
-- repeated corrections identify prompt weaknesses
-- updated prompts or scoring rules are validated by rerunning offline evals
-
-## Tracing and storage
-
-`TraceRecorder` creates a root trace and spans for:
-
-- `retrieve`
-- `prompt_build`
-- `llm_call`
-- `output_parse`
-- `output_validate`
-- `output_repair`
-- `online_score`
-- `review_route`
-- `persist_run`
-
-SQLite stores:
-
-- run records
-- offline eval summaries and case results
-- offline comparison summaries and case deltas
-- review queue items
-- reviewer annotations
-
-Raw question text is not stored in run records by default.
-
-## Offline evals vs online scoring
-
-| Dimension | Offline evals | Online scoring |
-| --- | --- | --- |
-| Purpose | regression verification across labeled cases | per-run triage and review routing |
-| Input | synthetic eval dataset | one live request |
-| Output | aggregate metrics, bucket gates, and comparison deltas | score breakdown, risk band, suspicious flags |
-| Best use | compare changes across versions | inspect runtime quality and risk |
-
-## Tradeoffs
-
-- retrieval is lexical and deterministic by design
-- traces are local summaries, not an external observability backend
-- Streamlit is used only for demo and inspection
-- reviewer annotations are not yet auto-promoted into prompt or dataset changes
-- the OpenAI backend is optional and not used in tests
-- the mock backend still powers synthetic stress cases, but prompt-specific outcome cheats have been removed from the mock adapter

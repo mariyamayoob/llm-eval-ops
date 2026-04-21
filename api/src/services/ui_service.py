@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from evals.contracts import OfflineComparisonSummary, OfflineEvalSummary, ReviewQueueItem
-from model.contracts import RunRecord
+from model.contracts import LLMJudgeRecord, OnlineSummarySnapshot, RunRecord, RuntimeFeedbackEvent
 from observability.tracing import TraceRecord
 
 
@@ -26,3 +26,18 @@ class UIService:
 
     def review_queue(self, items: list[ReviewQueueItem]) -> list[dict]:
         return [item.model_dump() for item in items]
+
+    def feedback_event(self, event: RuntimeFeedbackEvent) -> dict:
+        return event.model_dump()
+
+    def feedback_events(self, events: list[RuntimeFeedbackEvent]) -> list[dict]:
+        return [event.model_dump() for event in events]
+
+    def llm_judge_record(self, record: LLMJudgeRecord) -> dict:
+        return record.model_dump()
+
+    def llm_judge_records(self, records: list[LLMJudgeRecord]) -> list[dict]:
+        return [record.model_dump() for record in records]
+
+    def online_control_summary(self, snapshot: OnlineSummarySnapshot) -> dict:
+        return snapshot.model_dump()

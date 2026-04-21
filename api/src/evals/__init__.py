@@ -1,6 +1,9 @@
+"""Offline eval package.
+
+Avoid re-export imports at package import time to prevent circular-import traps.
+Import concrete types from `evals.contracts` / `evals.runner` directly.
+"""
+
 from __future__ import annotations
 
-from evals.contracts import ReviewQueueItem
-from evals.runner import OfflineEvalRunner
-
-__all__ = ["OfflineEvalRunner", "ReviewQueueItem"]
+__all__: list[str] = []

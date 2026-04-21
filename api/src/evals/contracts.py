@@ -13,6 +13,7 @@ from model.contracts import (
     FailureReason,
     FinalDisposition,
     ModelBackend,
+    Outcome,
     ReviewPriority,
     ReviewStatus,
     ScenarioName,
@@ -113,6 +114,8 @@ class EvalCase(BaseModel):
     refusal_reason_expected: str | None = None
     source_snapshot_id: str | None = None
     retrieval_config_version: str | None = None
+    # Reference-only human label text. The offline gates do not score this today.
+    reference_response_text: str | None = None
     label_notes: str | None = None
     is_ambiguous: bool = False
     gate_group: str | None = None
@@ -457,17 +460,25 @@ class ReviewQueueItem(BaseModel):
     online_score_total: float
     review_priority: ReviewPriority
     suspicious_flags: list[SuspiciousFlag] = Field(default_factory=list)
+    review_source: str = "runtime"
+    review_reason: str | None = None
     review_status: ReviewStatus = ReviewStatus.PENDING
     reviewer_label: str | None = None
     reviewer_notes: str | None = None
     final_disposition: FinalDisposition | None = None
+    promote_to_offline_eval: bool = False
+    should_have_outcome: Outcome | None = None
+    should_have_response_text: str | None = None
 
 
 class ReviewerAnnotation(BaseModel):
     reviewer_label: str
     reviewer_notes: str | None = None
     review_status: ReviewStatus
-    final_disposition: FinalDisposition
+    final_disposition: FinalDisposition | None = None
+    promote_to_offline_eval: bool = False
+    should_have_outcome: Outcome | None = None
+    should_have_response_text: str | None = None
 
 
 def parse_eval_cases(payload: Any) -> list[EvalCase]:

@@ -1,0 +1,8 @@
+{
+  "policy_version": "online-alert-policy:v1",
+  "max_invalid_output_rate": 0.2,
+  "max_review_recommended_rate": 0.45,
+  "max_thumbs_down_rate": 0.2,
+  "min_supported_answer_rate": 0.4,
+  "max_high_risk_run_rate": 0.3
+}

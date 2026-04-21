@@ -2,19 +2,27 @@ from __future__ import annotations
 
 from evals.contracts import CaseSet, OfflineComparisonRequest, ReviewerAnnotation
 from evals.runner import OfflineEvalRunner
-from model.contracts import ModelBackend, PolicyDeskAssistantRequest, PolicyDeskAssistantResponse
+from model.contracts import (
+    ModelBackend,
+    PolicyDeskAssistantRequest,
+    PolicyDeskAssistantResponse,
+    RuntimeFeedbackRequest,
+)
 from observability.tracing import TraceRecorder
 from prompts.registry import DEFAULT_PROMPT_VERSION, PROMPT_VERSION_PATTERN
 from services.kb_service import KBService
 from services.metrics_service import OnlineScoringService
+from services.llm_judge_service import OpenAIJudgeService
 from services.model_service import ModelService
+from services.online_control_service import OnlineControlPlaneService
+from services.offline_eval_export_service import OfflineEvalExportService
 from services.qa_service import PolicyDeskService
 from services.retrieval_service import RetrievalService
 from services.run_service import RunService
 from services.storage_service import StorageService
 from services.ui_service import UIService
 from services.validation_service import ValidationService
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 
 
 BASE_PATH = "/policy-desk-assistant"
@@ -25,6 +33,7 @@ def create_app(
     db_path: str = "data/policy_desk.db",
     eval_dataset_path: str = "data/eval_dataset.json",
     offline_gate_policy_path: str = "data/offline_gate_policy.json",
+    online_alert_policy_path: str = "data/online_alert_policy.json",
 ) -> FastAPI:
     app = FastAPI(title="Policy Desk Assistant", version="1.0.0")
 
@@ -51,6 +60,17 @@ def create_app(
         dataset_path=eval_dataset_path,
         gate_policy_path=offline_gate_policy_path,
     )
+    online_control_service = OnlineControlPlaneService(
+        run_service=run_service,
+        storage=storage_service,
+        alert_policy_path=online_alert_policy_path,
+    )
+    llm_judge_service = OpenAIJudgeService(
+        kb_service=kb_service,
+        run_service=run_service,
+        storage=storage_service,
+    )
+    offline_export_service = OfflineEvalExportService(run_service=run_service)
     ui_service = UIService()
 
     app.state.policy_service = policy_service
@@ -58,6 +78,9 @@ def create_app(
     app.state.storage_service = storage_service
     app.state.tracer = tracer
     app.state.eval_runner = eval_runner
+    app.state.online_control_service = online_control_service
+    app.state.llm_judge_service = llm_judge_service
+    app.state.offline_export_service = offline_export_service
     app.state.ui_service = ui_service
 
     @app.get("/health")
@@ -65,8 +88,10 @@ def create_app(
         return {"status": "ok"}
 
     @app.post(f"{BASE_PATH}/respond", response_model=PolicyDeskAssistantResponse)
-    def respond(request: PolicyDeskAssistantRequest):
-        return policy_service.respond(request)
+    def respond(request: PolicyDeskAssistantRequest, background_tasks: BackgroundTasks):
+        response = policy_service.respond(request)
+        background_tasks.add_task(llm_judge_service.maybe_judge_run, response.run_id)
+        return response
 
     @app.get(f"{BASE_PATH}/runs")
     def list_runs(limit: int = 50):
@@ -79,6 +104,42 @@ def create_app(
             raise HTTPException(status_code=404, detail={"run_id": run_id, "message": "Run not found"})
         trace = tracer.get_trace(record.trace_id)
         return ui_service.run_explorer(record, trace)
+
+    @app.post(f"{BASE_PATH}/feedback")
+    def create_feedback(request: RuntimeFeedbackRequest):
+        try:
+            event = online_control_service.record_feedback(request)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail={"run_id": request.run_id, "message": str(exc)}) from exc
+        return ui_service.feedback_event(event)
+
+    @app.get(f"{BASE_PATH}/feedback")
+    def list_feedback(limit: int = 50, run_id: str | None = None):
+        return ui_service.feedback_events(online_control_service.list_feedback(limit=limit, run_id=run_id))
+
+    @app.get(f"{BASE_PATH}/feedback/summary")
+    def feedback_summary(limit: int = 50):
+        return ui_service.online_control_summary(online_control_service.build_live_summary(limit=limit))
+
+    @app.get(f"{BASE_PATH}/llm-judge")
+    def list_llm_judge(limit: int = 50, run_id: str | None = None):
+        return ui_service.llm_judge_records(llm_judge_service.list_judge_records(limit=limit, run_id=run_id))
+
+    @app.get(f"{BASE_PATH}/llm-judge/{{judge_id}}")
+    def get_llm_judge(judge_id: str):
+        record = llm_judge_service.get_judge_record(judge_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"judge_id": judge_id, "message": "LLM judge record not found"})
+        return ui_service.llm_judge_record(record)
+
+    @app.post(f"{BASE_PATH}/llm-judge/run/{{run_id}}")
+    def force_llm_judge(run_id: str, background_tasks: BackgroundTasks):
+        background_tasks.add_task(llm_judge_service.force_judge_run, run_id)
+        return {"status": "queued", "run_id": run_id}
+
+    @app.get(f"{BASE_PATH}/offline-eval/export")
+    def export_offline_eval_cases():
+        return {"cases": offline_export_service.export_promoted_cases()}
 
     @app.get(f"{BASE_PATH}/evals/offline")
     def run_offline_evals(
@@ -124,6 +185,11 @@ def create_app(
         if item is None:
             raise HTTPException(status_code=404, detail={"item_id": item_id, "message": "Review queue item not found"})
         return item
+
+    @app.post(f"{BASE_PATH}/review-queue/prune")
+    def prune_review_queue(*, max_open_runtime_items: int = 20):
+        deleted_count = run_service.prune_review_queue_open_runtime(max_open_runtime_items=max_open_runtime_items)
+        return {"deleted_count": deleted_count, "max_open_runtime_items": max_open_runtime_items}
 
     return app
 
