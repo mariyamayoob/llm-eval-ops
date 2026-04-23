@@ -44,11 +44,11 @@ def test_sloppy_prompt_routes_missing_evidence_to_review(client):
         },
     )
     payload = response.json()
-    assert payload["outcome"] == "human_review_recommended"
-    assert payload["review_required"] is True
+    assert payload["review_required"] is False
+    assert payload["risk_band"] in {"high", "medium"}
 
 
-def test_human_review_recommended_path(client):
+def test_unsupported_answer_is_high_risk_and_deferred_to_judge(client):
     response = client.post(
         "/policy-desk-assistant/respond",
         json={
@@ -59,12 +59,11 @@ def test_human_review_recommended_path(client):
         },
     )
     payload = response.json()
-    assert payload["outcome"] == "human_review_recommended"
-    assert payload["review_required"] is True
-    assert payload["review_queue_item_id"]
+    assert payload["review_required"] is False
+    assert payload["risk_band"] == "high"
 
 
-def test_malformed_json_repair_creates_review(client):
+def test_malformed_json_repair_marks_high_risk(client):
     response = client.post(
         "/policy-desk-assistant/respond",
         json={
@@ -75,8 +74,9 @@ def test_malformed_json_repair_creates_review(client):
         },
     )
     payload = response.json()
-    assert payload["outcome"] == "human_review_recommended"
     assert "repair_attempted" in payload["suspicious_flags"]
+    assert payload["risk_band"] == "high"
+    assert payload["review_required"] is False
 
 
 def test_conflicting_evidence_handling(client):
@@ -93,20 +93,27 @@ def test_conflicting_evidence_handling(client):
     assert payload["outcome"] in {"refused_more_evidence_needed", "human_review_recommended"}
 
 
-def test_review_queue_item_creation(client):
+def test_review_queue_item_creation_via_feedback_escalation(client):
     response = client.post(
         "/policy-desk-assistant/respond",
         json={
-            "question": "How long does a customer have to request a refund?",
-            "scenario": "unsupported_answer",
+            "question": "What is the policy for pet insurance reimbursement?",
+            "scenario": "retrieval_miss",
             "model_backend": "mock",
             "prompt_version": "qa-prompt:v1",
         },
     )
-    item_id = response.json()["review_queue_item_id"]
+    run_id = response.json()["run_id"]
+
+    feedback = client.post(
+        "/policy-desk-assistant/feedback",
+        json={"run_id": run_id, "event_type": "thumbs_down"},
+    )
+    assert feedback.status_code == 200
+
     queue = client.get("/policy-desk-assistant/review-queue")
     assert queue.status_code == 200
-    assert any(item["review_queue_item_id"] == item_id for item in queue.json())
+    assert any(item["run_id"] == run_id for item in queue.json())
 
 
 def test_review_queue_prune_deletes_old_pending_runtime_items(client):
@@ -114,13 +121,16 @@ def test_review_queue_prune_deletes_old_pending_runtime_items(client):
         response = client.post(
             "/policy-desk-assistant/respond",
             json={
-                "question": f"How long does a customer have to request a refund? Case {i}",
-                "scenario": "unsupported_answer",
+                "question": f"What is the policy for pet insurance reimbursement? Case {i}",
+                "scenario": "retrieval_miss",
                 "model_backend": "mock",
                 "prompt_version": "qa-prompt:v1",
             },
         )
         assert response.status_code == 200
+        run_id = response.json()["run_id"]
+        feedback = client.post("/policy-desk-assistant/feedback", json={"run_id": run_id, "event_type": "thumbs_down"})
+        assert feedback.status_code == 200
 
     pruned = client.post("/policy-desk-assistant/review-queue/prune?max_open_runtime_items=5")
     assert pruned.status_code == 200

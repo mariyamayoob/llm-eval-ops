@@ -17,7 +17,6 @@ from model.contracts import (
     OnlineMetricsSummary,
     OnlineSummarySnapshot,
     Outcome,
-    ReviewPriority,
     RiskBand,
     RunRecord,
     RuntimeFeedbackEvent,
@@ -26,6 +25,7 @@ from model.contracts import (
 )
 from services.run_service import RunService
 from services.storage_service import StorageService
+from services.human_review_router import HumanReviewRouter, ReviewRouteRequest
 
 
 CORE_ROLLBACK_METRICS = {
@@ -49,10 +49,12 @@ class OnlineControlPlaneService:
         *,
         run_service: RunService,
         storage: StorageService,
+        review_router: HumanReviewRouter,
         alert_policy_path: str = "data/online_alert_policy.json",
     ) -> None:
         self.run_service = run_service
         self.storage = storage
+        self.review_router = review_router
         self.alert_policy_path = Path(alert_policy_path)
 
     def record_feedback(self, request: RuntimeFeedbackRequest) -> RuntimeFeedbackEvent:
@@ -74,11 +76,19 @@ class OnlineControlPlaneService:
         )
         self.storage.write_feedback_event(event)
 
-        if run.risk_band == RiskBand.HIGH and event.event_type == FeedbackEventType.THUMBS_DOWN:
-            self._ensure_review_for_run(
-                run,
-                reason="High-risk run received a thumbs-down signal.",
-                source="thumbs_down_feedback",
+        if run.risk_band in {RiskBand.MEDIUM, RiskBand.HIGH} and event.event_type == FeedbackEventType.THUMBS_DOWN:
+            self.review_router.ensure_review_item(
+                ReviewRouteRequest(
+                    run_id=run.run_id,
+                    source="thumbs_down_feedback",
+                    reason="Medium/high-risk run received a thumbs-down signal.",
+                    reason_codes=["feedback_thumbs_down_risky_run"],
+                    metadata={
+                        "event_id": event.event_id,
+                        "session_id": event.session_id,
+                        "event_value": event.event_value,
+                    },
+                )
             )
         return event
 
@@ -100,10 +110,17 @@ class OnlineControlPlaneService:
         if alert_evaluation.status == AlertStatus.ACTION_REQUIRED:
             for run in worst_runs:
                 review_items.append(
-                    self._ensure_review_for_run(
-                        run,
-                        reason="Online metrics summary reached action_required.",
-                        source="online_summary_alert",
+                    self.review_router.ensure_review_item(
+                        ReviewRouteRequest(
+                            run_id=run.run_id,
+                            source="online_summary_alert",
+                            reason="Online metrics summary reached action_required.",
+                            reason_codes=["online_summary_action_required"],
+                            metadata={
+                                "alert_status": alert_evaluation.status.value,
+                                "worst_run_ranked": True,
+                            },
+                        )
                     )
                 )
         return OnlineSummarySnapshot(
@@ -389,23 +406,6 @@ class OnlineControlPlaneService:
     def _is_invalid_output(self, run: RunRecord) -> bool:
         validation = run.validation_result
         return (not validation.structure_valid) or (not validation.citation_valid) or validation.repair_attempted
-
-    def _ensure_review_for_run(self, run: RunRecord, *, reason: str, source: str) -> ReviewQueueItem:
-        existing = self.run_service.find_review_item_by_run(run.run_id)
-        if existing is not None:
-            return existing
-        item = ReviewQueueItem(
-            review_queue_item_id=str(uuid4()),
-            run_id=run.run_id,
-            trace_id=run.trace_id,
-            online_score_total=run.online_score_total,
-            review_priority=ReviewPriority.HIGH if run.risk_band == RiskBand.HIGH else ReviewPriority.MEDIUM,
-            suspicious_flags=run.suspicious_flags,
-            review_source=source,
-            review_reason=reason,
-        )
-        self.run_service.enqueue_review(item)
-        return item
 
     def _rank_live_runs(
         self,

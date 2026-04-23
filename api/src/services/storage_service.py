@@ -258,6 +258,42 @@ class StorageService:
             )
             return item
 
+    def clear_all_tables(self) -> dict[str, int]:
+        """Delete all rows from the demo SQLite tables (keeps schema + db file)."""
+        tables = [
+            "reviewer_annotations",
+            "review_queue",
+            "runtime_feedback_events",
+            "llm_judge_records",
+            "run_records",
+            "offline_eval_cases",
+            "offline_eval_runs",
+            "offline_comparison_cases",
+            "offline_comparison_runs",
+        ]
+        deleted: dict[str, int] = {}
+        with self._connect() as conn:
+            for table in tables:
+                deleted[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in tables:
+                conn.execute(f"DELETE FROM {table}")
+        return deleted
+
+    def clear_review_and_judge_tables(self) -> dict[str, int]:
+        """Delete all rows from human review + judge tables (keeps runs/metrics)."""
+        tables = [
+            "reviewer_annotations",
+            "review_queue",
+            "llm_judge_records",
+        ]
+        deleted: dict[str, int] = {}
+        with self._connect() as conn:
+            for table in tables:
+                deleted[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in tables:
+                conn.execute(f"DELETE FROM {table}")
+        return deleted
+
     def write_feedback_event(self, event: RuntimeFeedbackEvent) -> None:
         with self._connect() as conn:
             conn.execute(

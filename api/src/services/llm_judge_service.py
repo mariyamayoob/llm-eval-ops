@@ -6,24 +6,23 @@ import os
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from evals.contracts import ReviewQueueItem
 from model.contracts import (
     FeedbackEventType,
     LLMJudgeAssessment,
     LLMJudgeRecord,
     LLMJudgeStatus,
-    Outcome,
     ReviewPriority,
     RiskBand,
 )
 from services.kb_service import KBService
+from services.human_review_router import HumanReviewRouter, ReviewRouteRequest
 from services.run_service import RunService
 from services.storage_service import StorageService
 
 
 SAMPLE_RATES = {
-    RiskBand.LOW: 0.10,
-    RiskBand.MEDIUM: 0.30,
+    RiskBand.LOW: 0.20,
+    RiskBand.MEDIUM: 1.00,
     RiskBand.HIGH: 1.00,
 }
 
@@ -35,12 +34,20 @@ class OpenAIJudgeService:
         kb_service: KBService,
         run_service: RunService,
         storage: StorageService,
+        review_router: HumanReviewRouter,
     ) -> None:
         self.kb_service = kb_service
         self.run_service = run_service
         self.storage = storage
+        self.review_router = review_router
         self.enabled = bool(os.getenv("OPENAI_API_KEY")) and os.getenv("LLM_JUDGE_ENABLED", "true").lower() != "false"
         self.model_name = os.getenv("OPENAI_JUDGE_MODEL", "gpt-5-mini")
+
+    def should_schedule_judge(self, *, run_id: str, risk_band: RiskBand, review_required: bool) -> bool:
+        if not self.enabled:
+            return False
+        sample_rate = SAMPLE_RATES[risk_band]
+        return self._sample_bucket(run_id) < sample_rate
 
     def maybe_judge_run(self, run_id: str) -> LLMJudgeRecord | None:
         if not self.enabled:
@@ -48,8 +55,6 @@ class OpenAIJudgeService:
 
         run = self.run_service.get_run(run_id)
         if run is None or run.question is None:
-            return None
-        if run.review_required:
             return None
         existing = self.storage.list_llm_judge_records(limit=1, run_id=run_id)
         if existing:
@@ -81,13 +86,11 @@ class OpenAIJudgeService:
         return self.storage.get_llm_judge_record(judge_id)
 
     def force_judge_run(self, run_id: str) -> LLMJudgeRecord | None:
-        """Bypass sampling for demo/operator use. Still skips runs already in human review."""
+        """Bypass sampling for demo/operator use."""
         if not self.enabled:
             return None
         run = self.run_service.get_run(run_id)
         if run is None or run.question is None:
-            return None
-        if run.review_required:
             return None
         existing = self.storage.list_llm_judge_records(limit=1, run_id=run_id)
         if existing:
@@ -116,7 +119,6 @@ class OpenAIJudgeService:
                     {"role": "system", "content": self._judge_system_prompt()},
                     {"role": "user", "content": json.dumps(self._judge_payload(run))},
                 ],
-                temperature=0,
                 max_output_tokens=700,
                 text={
                     "format": {
@@ -138,9 +140,27 @@ class OpenAIJudgeService:
             self.storage.write_llm_judge_record(record)
 
             if assessment.human_review_recommended:
-                review_item = self._ensure_review_for_run(
-                    run_id=run.run_id,
-                    reason=assessment.human_review_reason or "LLM judge recommended human review.",
+                base_reason = assessment.human_review_reason or "LLM judge recommended human review."
+                if run.risk_band == RiskBand.LOW:
+                    reason = f"Runtime risk band was LOW, but semantic review recommends human review: {base_reason}"
+                    reason_codes = ["semantic_review_recommended", "runtime_low_risk_judge_override"]
+                else:
+                    reason = base_reason
+                    reason_codes = ["semantic_review_recommended"]
+                review_item = self.review_router.ensure_review_item(
+                    ReviewRouteRequest(
+                        run_id=run.run_id,
+                        source="llm_judge",
+                        reason=reason,
+                        reason_codes=reason_codes,
+                        priority=ReviewPriority.HIGH if run.risk_band == RiskBand.HIGH else ReviewPriority.MEDIUM,
+                        metadata={
+                            "judge_id": record.judge_id,
+                            "judge_model": record.judge_model,
+                            "overall_score": assessment.overall_score,
+                            "runtime_risk_band": run.risk_band.value,
+                        },
+                    )
                 )
                 record.review_queue_item_id = review_item.review_queue_item_id
                 self.storage.write_llm_judge_record(record)
@@ -151,32 +171,6 @@ class OpenAIJudgeService:
             record.error_message = str(exc)
             self.storage.write_llm_judge_record(record)
             return record
-
-    def _ensure_review_for_run(self, *, run_id: str, reason: str) -> ReviewQueueItem:
-        existing = self.run_service.find_review_item_by_run(run_id)
-        if existing is not None:
-            return existing
-
-        run = self.run_service.get_run(run_id)
-        if run is None:
-            raise LookupError(f"Run {run_id} was not found.")
-
-        item = ReviewQueueItem(
-            review_queue_item_id=str(uuid4()),
-            run_id=run.run_id,
-            trace_id=run.trace_id,
-            online_score_total=run.online_score_total,
-            review_priority=ReviewPriority.HIGH if run.risk_band == RiskBand.HIGH else ReviewPriority.MEDIUM,
-            suspicious_flags=run.suspicious_flags,
-            review_source="llm_judge",
-            review_reason=reason,
-        )
-        self.run_service.enqueue_review(item)
-
-        run.review_required = True
-        run.review_queue_item_id = item.review_queue_item_id
-        self.run_service.write_run(run)
-        return item
 
     def _judge_payload(self, run) -> dict[str, object]:
         response_payload = run.response_payload
@@ -233,7 +227,7 @@ class OpenAIJudgeService:
 
     def _sample_bucket(self, run_id: str) -> float:
         digest = hashlib.sha256(f"llm-judge:{run_id}".encode("utf-8")).hexdigest()
-        return int(digest[:8], 16) / 0xFFFFFFFF
+        return int(digest[:8], 16) / 0x100000000
 
     def _strict_json_schema(self, schema: dict[str, object]) -> dict[str, object]:
         def walk(node: object) -> object:
@@ -249,3 +243,7 @@ class OpenAIJudgeService:
             return node
 
         return walk(schema)
+
+
+# Clearer architecture alias (used in docs/articles).
+SemanticReviewOrchestrator = OpenAIJudgeService

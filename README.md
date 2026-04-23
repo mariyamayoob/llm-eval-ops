@@ -13,9 +13,9 @@ For deeper implementation notes, see `docs/architecture.md`.
 ## What This Repo Demonstrates
 
 - evidence-bound answering with strict structured output validation (+ one repair attempt)
-- three runtime outcomes: `supported_answer`, `refused_more_evidence_needed`, `human_review_recommended`
-- deterministic runtime scoring, suspicious flags, and risk bands on every run
-- a minimal human review queue with persisted reviewer corrections
+- deterministic runtime checks with suspicious flags and risk bands on every run
+- async LLM-as-judge semantic review on a sampled slice (100% medium/high-risk, 20% low-risk; deterministic by `run_id`)
+- a human review queue fed by judge + side-channel signals (feedback + aggregate alerts), with dedupe by `run_id`
 - offline evals (single-run scoring and baseline-vs-candidate comparison) using the same runtime pipeline
 - an “online control plane” summary view: rolling metrics + threshold-based alerts + an async OpenAI judge layer
 
@@ -44,6 +44,25 @@ pytest
 
 ## Key Flows
 
+### Architecture (Online Eval Funnel)
+
+Main per-run path (never blocks on semantic judging):
+
+- request → retrieval → model call → validation/repair → deterministic checks → risk band → persist run → return response → async semantic review (sampled) → human review only if judge/side-channels route it → promote reviewed failures into offline eval cases
+
+Side-channel signals (control plane):
+
+- thumbs-down feedback can confirm/escalate risky runs
+- aggregate online summary alerts can surface drift and create review work
+- reviewers can annotate and promote cases into offline tests
+
+Implementation entry points:
+
+- Deterministic runtime checks: `api/src/services/metrics_service.py` (`OnlineScoringService.evaluate`)
+- Semantic review (LLM-as-judge): `api/src/services/llm_judge_service.py` (`OpenAIJudgeService`)
+- Central review routing/dedupe: `api/src/services/human_review_router.py` (`HumanReviewRouter`)
+- Full walkthrough + diagram: `docs/architecture.md`
+
 Offline regression gates:
 
 - Dataset lives in `data/eval_dataset.json`.
@@ -59,8 +78,8 @@ Online control plane:
 
 Async LLM judge:
 
-- Runs already routed to human review are skipped.
-- Sampling is deterministic by `run_id`: 10% of low-risk, 30% of medium-risk, and 100% of high-risk runs.
+- Runs already routed to human review can still be judged; the judge signal is merged into the existing review item (dedupe by `run_id`).
+- Sampling is deterministic by `run_id`: 20% of low-risk, and 100% of medium/high-risk runs.
 - The judge scores `supportedness`, `policy_alignment`, and `response_mode`, and can enqueue human review with source `llm_judge`.
 
 Review → offline eval export:
@@ -94,7 +113,7 @@ Fetch judge records:
 curl "http://127.0.0.1:8000/policy-desk-assistant/llm-judge?limit=20"
 ```
 
-Force a judge run (bypasses sampling, still skips already-human-routed runs):
+Force a judge run (bypasses sampling):
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/policy-desk-assistant/llm-judge/run/{run_id}"

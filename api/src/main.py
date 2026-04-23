@@ -11,6 +11,7 @@ from model.contracts import (
 from observability.tracing import TraceRecorder
 from prompts.registry import DEFAULT_PROMPT_VERSION, PROMPT_VERSION_PATTERN
 from services.kb_service import KBService
+from services.human_review_router import HumanReviewRouter
 from services.metrics_service import OnlineScoringService
 from services.llm_judge_service import OpenAIJudgeService
 from services.model_service import ModelService
@@ -23,9 +24,14 @@ from services.storage_service import StorageService
 from services.ui_service import UIService
 from services.validation_service import ValidationService
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 
 BASE_PATH = "/policy-desk-assistant"
+
+
+class DevResetRequest(BaseModel):
+    confirm: str
 
 
 def create_app(
@@ -44,6 +50,7 @@ def create_app(
     scoring_service = OnlineScoringService()
     storage_service = StorageService(db_path=db_path)
     run_service = RunService(storage=storage_service)
+    review_router = HumanReviewRouter(run_service=run_service)
     tracer = TraceRecorder()
     policy_service = PolicyDeskService(
         kb_service=kb_service,
@@ -52,6 +59,7 @@ def create_app(
         validation_service=validation_service,
         scoring_service=scoring_service,
         run_service=run_service,
+        review_router=review_router,
         tracer=tracer,
     )
     eval_runner = OfflineEvalRunner(
@@ -63,12 +71,14 @@ def create_app(
     online_control_service = OnlineControlPlaneService(
         run_service=run_service,
         storage=storage_service,
+        review_router=review_router,
         alert_policy_path=online_alert_policy_path,
     )
     llm_judge_service = OpenAIJudgeService(
         kb_service=kb_service,
         run_service=run_service,
         storage=storage_service,
+        review_router=review_router,
     )
     offline_export_service = OfflineEvalExportService(run_service=run_service)
     ui_service = UIService()
@@ -90,7 +100,12 @@ def create_app(
     @app.post(f"{BASE_PATH}/respond", response_model=PolicyDeskAssistantResponse)
     def respond(request: PolicyDeskAssistantRequest, background_tasks: BackgroundTasks):
         response = policy_service.respond(request)
-        background_tasks.add_task(llm_judge_service.maybe_judge_run, response.run_id)
+        if llm_judge_service.should_schedule_judge(
+            run_id=response.run_id,
+            risk_band=response.risk_band,
+            review_required=response.review_required,
+        ):
+            background_tasks.add_task(llm_judge_service.maybe_judge_run, response.run_id)
         return response
 
     @app.get(f"{BASE_PATH}/runs")
@@ -190,6 +205,20 @@ def create_app(
     def prune_review_queue(*, max_open_runtime_items: int = 20):
         deleted_count = run_service.prune_review_queue_open_runtime(max_open_runtime_items=max_open_runtime_items)
         return {"deleted_count": deleted_count, "max_open_runtime_items": max_open_runtime_items}
+
+    @app.post(f"{BASE_PATH}/dev/reset")
+    def dev_reset(request: DevResetRequest):
+        if request.confirm.strip().upper() != "RESET":
+            raise HTTPException(status_code=400, detail={"message": "Confirmation required. Send {'confirm':'RESET'}."})
+        deleted = storage_service.clear_all_tables()
+        return {"status": "cleared", "deleted": deleted}
+
+    @app.post(f"{BASE_PATH}/dev/reset/review-and-judge")
+    def dev_reset_review_and_judge(request: DevResetRequest):
+        if request.confirm.strip().upper() != "RESET":
+            raise HTTPException(status_code=400, detail={"message": "Confirmation required. Send {'confirm':'RESET'}."})
+        deleted = storage_service.clear_review_and_judge_tables()
+        return {"status": "cleared", "deleted": deleted}
 
     return app
 

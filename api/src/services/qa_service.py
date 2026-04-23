@@ -4,7 +4,6 @@ import hashlib
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from evals.contracts import ReviewQueueItem
 from model.contracts import (
     FailureCategory,
     FailureReason,
@@ -21,6 +20,7 @@ from model.contracts import (
     SuspiciousFlag,
 )
 from observability.tracing import TraceRecorder
+from services.human_review_router import HumanReviewRouter
 from services.kb_service import KBService
 from services.metrics_service import OnlineScoringService
 from services.model_service import ModelCallResult, ModelService
@@ -38,6 +38,7 @@ class PolicyDeskService:
         validation_service: ValidationService,
         scoring_service: OnlineScoringService,
         run_service: RunService,
+        review_router: HumanReviewRouter,
         tracer: TraceRecorder,
     ) -> None:
         self.kb_service = kb_service
@@ -46,6 +47,7 @@ class PolicyDeskService:
         self.validation_service = validation_service
         self.scoring_service = scoring_service
         self.run_service = run_service
+        self.review_router = review_router
         self.tracer = tracer
 
     def respond(self, request: PolicyDeskAssistantRequest) -> PolicyDeskAssistantResponse:
@@ -112,11 +114,15 @@ class PolicyDeskService:
             timings["output_repair"] = repair_span.finish(repair_attempted=True)
 
         score_span = self.tracer.start_span(trace_id, "online_score")
-        score_breakdown, suspicious_flags, risk_band, review_decision = self.scoring_service.score(
+        runtime_checks = self.scoring_service.evaluate(
             structured_output=structured_output,
             validation=validation,
             retrieval_stats=retrieval_stats,
         )
+        score_breakdown = runtime_checks.score_breakdown
+        suspicious_flags = runtime_checks.suspicious_flags
+        risk_band = runtime_checks.risk_band
+        review_decision = runtime_checks.review_decision
         timings["online_score"] = score_span.finish(
             online_score_total=score_breakdown.total,
             suspicious_flags=[flag.value for flag in suspicious_flags],
@@ -126,19 +132,6 @@ class PolicyDeskService:
         review_queue_item_id = None
 
         review_span = self.tracer.start_span(trace_id, "review_route")
-        if review_decision.review_required:
-            review_queue_item_id = str(uuid4())
-            queue_item = ReviewQueueItem(
-                review_queue_item_id=review_queue_item_id,
-                run_id=run_id,
-                trace_id=trace_id,
-                online_score_total=score_breakdown.total,
-                review_priority=review_decision.review_priority or ReviewPriority.HIGH,
-                suspicious_flags=suspicious_flags,
-                review_source="runtime",
-                review_reason=review_decision.human_review_reason,
-            )
-            self.run_service.enqueue_review(queue_item)
         timings["review_route"] = review_span.finish(
             review_required=review_decision.review_required,
             review_queue_item_id=review_queue_item_id,

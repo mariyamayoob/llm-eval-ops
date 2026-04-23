@@ -14,7 +14,7 @@ def main() -> None:
     st.set_page_config(page_title="LLM Eval Ops", layout="wide")
 
     api_base = st.sidebar.text_input("API base URL", value="http://127.0.0.1:8000")
-    page = st.sidebar.radio("Page", ["Inference", "Run Explorer", "Offline Gates", "Review Queue", "Online Control"])
+    page = st.sidebar.radio("Page", ["Inference", "Run Explorer", "Offline Gates", "Online Control", "Review Queue"])
 
     api = ApiClient(api_base=api_base)
 
@@ -24,11 +24,10 @@ def main() -> None:
         render_run_explorer(api)
     elif page == "Offline Gates":
         render_offline_gates(api)
-    elif page == "Review Queue":
-        render_review_queue(api)
     elif page == "Online Control":
         render_online_control(api)
+    elif page == "Review Queue":
+        render_review_queue(api)
 
 
 main()
-

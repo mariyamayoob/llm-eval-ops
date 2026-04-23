@@ -31,8 +31,19 @@ def test_offline_eval_export_redacts_and_emits_case(monkeypatch):
                 },
             )
             assert response.status_code == 200
-            item_id = response.json()["review_queue_item_id"]
-            assert item_id
+            run_id = response.json()["run_id"]
+
+            feedback = client.post(
+                "/policy-desk-assistant/feedback",
+                json={"run_id": run_id, "event_type": "thumbs_down"},
+            )
+            assert feedback.status_code == 200
+
+            queue = client.get("/policy-desk-assistant/review-queue")
+            assert queue.status_code == 200
+            item = next((candidate for candidate in queue.json() if candidate["run_id"] == run_id), None)
+            assert item is not None
+            item_id = item["review_queue_item_id"]
 
             annotate = client.post(
                 f"/policy-desk-assistant/review-queue/{item_id}/annotate",

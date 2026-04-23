@@ -461,7 +461,10 @@ class ReviewQueueItem(BaseModel):
     review_priority: ReviewPriority
     suspicious_flags: list[SuspiciousFlag] = Field(default_factory=list)
     review_source: str = "runtime"
+    review_sources: list[str] = Field(default_factory=list)
     review_reason: str | None = None
+    review_reason_codes: list[str] = Field(default_factory=list)
+    review_metadata: dict[str, Any] = Field(default_factory=dict)
     review_status: ReviewStatus = ReviewStatus.PENDING
     reviewer_label: str | None = None
     reviewer_notes: str | None = None

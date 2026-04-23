@@ -156,3 +156,57 @@ def test_force_llm_judge_endpoint_bypasses_sampling(monkeypatch):
             assert judge_records.json()[0]["assessment"]["human_review_recommended"] is True
     finally:
         shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
+def test_low_risk_run_skips_llm_judge_sampling(monkeypatch):
+    workspace_tmp, app = _judge_enabled_client(monkeypatch)
+    service = app.state.llm_judge_service
+    monkeypatch.setattr(service, "_sample_bucket", lambda run_id: 0.2)
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/policy-desk-assistant/respond",
+                json={
+                    "question": "How long does a customer have to request a refund?",
+                    "scenario": "normal",
+                    "model_backend": "mock",
+                    "prompt_version": "qa-prompt:v1",
+                },
+            )
+            assert response.status_code == 200
+
+            judge_records = client.get("/policy-desk-assistant/llm-judge?limit=10")
+            assert judge_records.status_code == 200
+            assert judge_records.json() == []
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
+def test_medium_risk_run_is_selected_for_llm_judge(monkeypatch):
+    workspace_tmp, app = _judge_enabled_client(monkeypatch)
+    service = app.state.llm_judge_service
+    monkeypatch.setattr(service, "_sample_bucket", lambda run_id: 0.0)
+    monkeypatch.setattr(service, "_client", lambda: _FakeJudgeClient(output_text=_judge_payload(recommend_human_review=False)))
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/policy-desk-assistant/respond",
+                json={
+                    "question": "How long does a customer have to request a refund?",
+                    "scenario": "wrong_refusal",
+                    "model_backend": "mock",
+                    "prompt_version": "qa-prompt:v1",
+                },
+            )
+            assert response.status_code == 200
+
+            judge_records = client.get("/policy-desk-assistant/llm-judge?limit=10")
+            assert judge_records.status_code == 200
+            body = judge_records.json()
+            assert len(body) == 1
+            assert body[0]["status"] == "completed"
+            assert body[0]["risk_band"] == "medium"
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)

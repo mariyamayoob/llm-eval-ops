@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from model.contracts import (
     FailureReason,
     RefusalReason,
@@ -30,7 +32,22 @@ REVIEW_BLOCKING_FLAGS = {
 }
 
 
+@dataclass(frozen=True)
+class RuntimeCheckResult:
+    score_breakdown: ScoreBreakdown
+    suspicious_flags: list[SuspiciousFlag]
+    risk_band: RiskBand
+    review_decision: ReviewDecision
+    review_reason_codes: list[str]
+
+
 class OnlineScoringService:
+    """Backwards-compatible name for runtime deterministic checks.
+
+    The repo's "online scoring" layer is intentionally deterministic and cheap.
+    It produces (a) a risk band and (b) a routing recommendation.
+    """
+
     def score(
         self,
         *,
@@ -38,8 +55,28 @@ class OnlineScoringService:
         validation: ValidationResult,
         retrieval_stats,
     ) -> tuple[ScoreBreakdown, list[SuspiciousFlag], RiskBand, ReviewDecision]:
-        # Keep runtime triage focused on the public-repo story:
-        # is the response valid, grounded, and safe enough to trust right now?
+        result = self.evaluate(
+            structured_output=structured_output,
+            validation=validation,
+            retrieval_stats=retrieval_stats,
+        )
+        return (
+            result.score_breakdown,
+            result.suspicious_flags,
+            result.risk_band,
+            result.review_decision,
+        )
+
+    def evaluate(
+        self,
+        *,
+        structured_output: StructuredPolicyOutput,
+        validation: ValidationResult,
+        retrieval_stats,
+    ) -> RuntimeCheckResult:
+        # Cheap, deterministic runtime triage:
+        # - assign a risk band (low/medium/high)
+        # - immediately escalate only on hard blockers
         groundedness = 1.0 if FailureReason.UNSUPPORTED_ANSWER not in validation.failure_reasons and not retrieval_stats.retrieval_empty else 0.35
         citation_validity = 1.0 if validation.citation_valid else 0.0
         policy_adherence = 1.0
@@ -96,25 +133,26 @@ class OnlineScoringService:
 
         if blocking_flags:
             risk_band = RiskBand.HIGH
-            review = ReviewDecision(
-                review_required=True,
-                review_priority=ReviewPriority.HIGH,
-                human_review_reason="Core validation or grounding checks require human review.",
-            )
-        elif total < 0.60:
-            risk_band = RiskBand.HIGH
-            review = ReviewDecision(
-                review_required=True,
-                review_priority=ReviewPriority.HIGH,
-                human_review_reason="Core runtime trust score is below the review threshold.",
-            )
-        elif advisory_flags or total < 0.85:
+            # Hard blockers are still flagged deterministically, but human review is now
+            # only created downstream (LLM judge / side-channel signals).
+            review = ReviewDecision(review_required=False)
+        elif advisory_flags or total < 0.60:
+            risk_band = RiskBand.HIGH if total < 0.60 else RiskBand.MEDIUM
+            review = ReviewDecision(review_required=False)
+        elif total < 0.85:
             risk_band = RiskBand.MEDIUM
             review = ReviewDecision(review_required=False)
         else:
             risk_band = RiskBand.LOW
             review = ReviewDecision(review_required=False)
-        return scores, flags, risk_band, review
+
+        return RuntimeCheckResult(
+            score_breakdown=scores,
+            suspicious_flags=flags,
+            risk_band=risk_band,
+            review_decision=review,
+            review_reason_codes=[flag.value for flag in blocking_flags],
+        )
 
     def _brand_voice_ok(self, structured_output: StructuredPolicyOutput) -> bool:
         content = structured_output.answer or structured_output.missing_or_conflicting_evidence_summary or ""
@@ -132,3 +170,7 @@ class OnlineScoringService:
         if retrieval_stats.similarity_max >= 0.15:
             return 0.8
         return 0.45
+
+
+# Clearer architecture alias (used in docs/articles).
+RuntimeDeterministicChecks = OnlineScoringService

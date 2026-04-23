@@ -18,9 +18,9 @@ Runtime inference produces one of three outcomes:
 
 - `supported_answer`: answer is present, citations are present, and evidence summary exists.
 - `refused_more_evidence_needed`: refusal with an explicit refusal reason + evidence gap summary.
-- `human_review_recommended`: the system decided a human should inspect (based on suspicious flags / low score / boundary behavior).
+- `human_review_recommended`: a *reviewer/judge* escalation outcome used in the review loop (not the default online response outcome).
 
-Note: `review_required` is tracked separately as an operator signal; a “safe abstain” can still be safe even if review is suggested.
+Note: `review_required` reflects whether the run is currently routed to the review queue. In the current online funnel, deterministic runtime checks *flag* hard blockers and assign a risk band, but review queue items are created downstream by the LLM judge and side-channel signals (feedback + aggregate alerts).
 
 ## Request Lifecycle (Online Inference)
 
@@ -34,10 +34,11 @@ High-level sequence:
 2. Retrieve evidence with deterministic lexical retrieval (`RetrievalService`).
 3. Call the model backend (`ModelService`) using a prompt profile (`prompt_version`).
 4. Parse + validate structured output (`ValidationService`).
-5. Compute runtime score breakdown, suspicious flags, and risk band (`OnlineScoringService`).
-6. Decide whether to enqueue a review item (runtime routing).
-7. Persist the run record (and review item if created) via `RunService` → `StorageService` (SQLite).
-8. Finalize the trace (`TraceRecorder`) with spans and summary fields.
+5. Run deterministic runtime checks and assign a risk band (`OnlineScoringService.evaluate`).
+6. Persist the run record via `RunService` -> `StorageService` (SQLite).
+7. Return the response immediately (the main request never blocks on semantic judging).
+8. Schedule async semantic review for the sampled slice (100% medium/high-risk, 20% low-risk).
+9. Human review is only created when the judge (or side-channel signals) recommend it.
 
 Trace spans are recorded for: `retrieve`, `prompt_build`, `llm_call`, `output_parse`, `output_validate`, `output_repair`, `online_score`, `review_route`, and `persist_run`.
 
@@ -57,14 +58,19 @@ This is a reference app: no external message bus, no distributed tracing backend
 
 ## Review Queue
 
-Review items are created by multiple paths:
+Review items are created by multiple paths, but **all creation/dedupe flows through `HumanReviewRouter`** (`api/src/services/human_review_router.py`):
 
-- runtime routing (inline deterministic checks and suspicious flags)
-- online control plane auto-enqueue when a high-risk run receives thumbs-down feedback
-- online summary alert evaluation when status becomes `action_required` (enqueues “worst runs”)
-- LLM judge when it recommends human review (enqueues with source `llm_judge`)
+- LLM judge when it recommends human escalation (`review_source="llm_judge"`)
+- feedback escalation when a medium/high-risk run receives thumbs-down feedback
+- online summary alert evaluation when status becomes `action_required` (enqueues "worst runs")
 
-Dedupe is by `run_id` to avoid queue spam when multiple signals point to the same run.
+Inline deterministic checks do **not** directly create human review items; they only assign risk bands + flags and feed the semantic review layer.
+
+Dedupe is by `run_id` to avoid queue spam when multiple signals point to the same run. When a run is re-flagged, the router merges signals into:
+
+- `review_sources`: all contributing sources (`runtime`, `llm_judge`, `thumbs_down_feedback`, `online_summary_alert`, ...)
+- `review_reason_codes`: lightweight reason codes
+- `review_metadata`: small structured payloads (e.g., judge_id, alert status)
 
 Reviewer updates are written via:
 
@@ -110,6 +116,10 @@ Case sets:
 
 The online control plane is a lightweight operator layer that rolls up recent runs + feedback into a business-readable summary, evaluates it against thresholds, and can open review items when the system drifts.
 
+This is intentionally a **side channel**: it can create review work and escalate specific runs, but it is not part of the main per-request inference path. The primary story is still:
+
+deterministic checks → (sampled) semantic review → human escalation → offline export.
+
 Components:
 
 - Feedback ingestion and persistence (`OnlineControlPlaneService.record_feedback`)
@@ -133,13 +143,15 @@ The summary is deterministic and intentionally small (counts + rates + average r
 
 ## Async OpenAI Judge (Reference Layer)
 
-The judge is a small “LLM-as-judge” layer that samples stored runs (that were not already routed to human review), grades them against retrieved evidence, and optionally recommends human review.
+The judge is a small **semantic review** layer ("LLM-as-judge") that samples stored runs, grades them against retrieved evidence, and optionally recommends human escalation (merged into the review queue by `run_id` when applicable).
+
+Important: the main `/respond` request path never blocks on this. The API schedules judge work via FastAPI background tasks only when sampling selects the run (`OpenAIJudgeService.should_schedule_judge` in `api/src/main.py`).
 
 Sampling:
 
 - deterministic by `run_id`
-- 10% of `low` risk runs
-- 30% of `medium` risk runs
+- 20% of `low` risk runs
+- 100% of `medium` risk runs
 - 100% of `high` risk runs
 
 Judge metrics:
@@ -149,7 +161,7 @@ Judge metrics:
 - `response_mode_score`
 - `overall_score` (simple average)
 
-If the judge recommends human review, a review item is created with `review_source="llm_judge"`.
+If the judge recommends human review, the case is routed via `HumanReviewRouter` and a review item is created with `review_source="llm_judge"`.
 
 Endpoints:
 
@@ -163,9 +175,9 @@ Environment flags:
 - `LLM_JUDGE_ENABLED=true|false` (defaults to enabled if `OPENAI_API_KEY` is present)
 - `OPENAI_JUDGE_MODEL=...` (defaults to `gpt-5-mini`)
 
-## Review → Offline Eval Export
+## Review -> Offline Eval Export
 
-To demonstrate how human review becomes future test coverage, the repo supports exporting “promoted” review items into a portable offline eval JSON file:
+To demonstrate how human review becomes future test coverage, the repo supports exporting "promoted" review items into a portable offline eval JSON file:
 
 - `GET /policy-desk-assistant/offline-eval/export`
 
@@ -202,4 +214,3 @@ This repo intentionally does not implement:
 - external queues (Kafka/Redis/etc.)
 - semantic drift detection / embeddings
 - production-grade PII detection and redaction
-
